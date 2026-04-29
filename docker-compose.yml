@@ -1,0 +1,13 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    ports:
+      - "3001:3001"
+    env_file:
+      - ./server/.env
+    environment:
+      - PORT=3001
+      - RHUBARB_PATH=/usr/local/bin/rhubarb
+      - PERSONAS_PATH=/app/dist/config/personas.json

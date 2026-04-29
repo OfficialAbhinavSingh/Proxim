@@ -1,0 +1,36 @@
+# Rhubarb upstream ships Linux x86_64 binaries linked against glibc — bookworm base avoids musl issues.
+FROM node:20-bookworm-slim AS rhubarb
+ARG RHUBARB_VERSION=1.14.0
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends wget unzip ca-certificates \
+  && wget -q "https://github.com/DanielSWolf/rhubarb-lip-sync/releases/download/v${RHUBARB_VERSION}/rhubarb-lip-sync-${RHUBARB_VERSION}-linux.zip" -O /tmp/rhubarb.zip \
+  && unzip -q /tmp/rhubarb.zip -d /tmp/rhubarb \
+  && RH_BIN="$(find /tmp/rhubarb -type f -name rhubarb -print -quit)" \
+  && test -n "$RH_BIN" \
+  && mv "$RH_BIN" /usr/local/bin/rhubarb \
+  && chmod +x /usr/local/bin/rhubarb \
+  && rm -rf /tmp/rhubarb /tmp/rhubarb.zip \
+  && apt-get purge -y wget unzip \
+  && rm -rf /var/lib/apt/lists/*
+
+FROM node:20-bookworm-slim AS build
+WORKDIR /app
+COPY server/package.json ./
+RUN npm install
+COPY server/tsconfig.json ./
+COPY server/src ./src
+RUN npm run build
+
+FROM node:20-bookworm-slim
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3001
+ENV RHUBARB_PATH=/usr/local/bin/rhubarb
+COPY --from=rhubarb /usr/local/bin/rhubarb /usr/local/bin/rhubarb
+COPY server/package.json ./
+RUN npm install --omit=dev
+COPY --from=build /app/dist ./dist
+COPY server/src/config/personas.json ./dist/config/personas.json
+ENV PERSONAS_PATH=/app/dist/config/personas.json
+EXPOSE 3001
+CMD ["node", "dist/index.js"]
