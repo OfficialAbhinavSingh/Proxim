@@ -11,18 +11,16 @@ export function Transcript({ open, onToggle, messages, streamingAssistant }: Tra
   return (
     <aside
       className={[
-        "flex flex-col border-white/10 bg-proxim-950/80 transition-[width] duration-200",
-        open ? "w-full border-t md:w-80 md:border-l md:border-t-0" : "w-0 overflow-hidden border-0",
+        "flex flex-col bg-surface/55 transition-[width] duration-200",
+        open ? "w-full border-t border-border md:w-80 md:border-l md:border-t-0" : "w-0 overflow-hidden border-0",
       ].join(" ")}
     >
-      <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
-        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">
-          Transcript
-        </span>
+      <div className="flex items-center justify-between border-b border-border px-3 py-2">
+        <span className="kicker">Transcript</span>
         <button
           type="button"
           onClick={onToggle}
-          className="rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-white/5"
+          className="btn px-2 py-1 text-xs"
         >
           {open ? "Hide" : "Show"}
         </button>
@@ -37,11 +35,16 @@ export function Transcript({ open, onToggle, messages, streamingAssistant }: Tra
               className={[
                 "inline-block max-w-[95%] rounded-2xl px-3 py-2",
                 m.role === "user"
-                  ? "bg-proxim-accent/25 text-slate-100"
-                  : "bg-proxim-800 text-slate-100 ring-1 ring-white/10",
+                  ? "border border-border"
+                  : "border border-border bg-surface2/75",
               ].join(" ")}
+              style={
+                m.role === "user"
+                  ? { background: "linear-gradient(115deg, rgb(var(--c-accent) / 0.16), rgb(var(--c-accent2) / 0.10))" }
+                  : undefined
+              }
             >
-              <p className="text-[10px] uppercase tracking-wide text-slate-500">
+              <p className="kicker">
                 {m.role === "user" ? "You" : m.emotion ? `HCP · ${m.emotion}` : "HCP"}
               </p>
               <p className="mt-1 whitespace-pre-wrap">{m.content}</p>
@@ -50,8 +53,8 @@ export function Transcript({ open, onToggle, messages, streamingAssistant }: Tra
         ))}
         {streamingAssistant ? (
           <div className="text-left">
-            <div className="inline-block max-w-[95%] rounded-2xl bg-proxim-800/70 px-3 py-2 italic text-slate-200 ring-1 ring-dashed ring-white/15">
-              <p className="text-[10px] uppercase tracking-wide text-slate-500">HCP · typing</p>
+            <div className="inline-block max-w-[95%] rounded-2xl border border-border bg-surface2/60 px-3 py-2 italic text-fg">
+              <p className="kicker">HCP · typing</p>
               <p className="mt-1 whitespace-pre-wrap">{streamingAssistant}</p>
             </div>
           </div>

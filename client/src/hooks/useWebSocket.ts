@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Emotion, VisemeKeyframe, WsClientMessage, WsServerMessage } from "../types";
+import type { Emotion, VisemeKeyframe, VisemeSource, WsClientMessage, WsServerMessage } from "../types";
 import { useSessionStore } from "../store/sessionStore";
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:3001";
@@ -8,6 +8,7 @@ export interface AudioChunkPayload {
   audioBase64: string;
   audioMimeType: string;
   visemes: VisemeKeyframe[];
+  visemeSource?: VisemeSource;
   isLast: boolean;
   sentenceIndex: number;
   /** Sentence text for Web Speech Synthesis fallback */
@@ -19,6 +20,7 @@ export interface AudioChunkPayload {
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const [connected, setConnected] = useState(false);
+  const connectAttemptRef = useRef(0);
   const onAudioChunkRef = useRef<(p: AudioChunkPayload) => void>(() => {});
   const onTranscriptRef = useRef<(text: string, emotion: Emotion) => void>(() => {});
   const onErrorRef = useRef<(msg: string) => void>(() => {});
@@ -26,18 +28,47 @@ export function useWebSocket() {
   const setCurrentEmotion = useSessionStore((s) => s.setCurrentEmotion);
   const clearAssistantStream = useSessionStore((s) => s.clearAssistantStream);
   const setAssistantStreamingText = useSessionStore((s) => s.setAssistantStreamingText);
+  const setCapabilities = useSessionStore((s) => s.setCapabilities);
+  const setWsProtocolVersion = useSessionStore((s) => s.setWsProtocolVersion);
+
+  const candidateUrls = useCallback((): string[] => {
+    const base = WS_URL;
+    const out = [base];
+    // Windows networks often resolve `localhost` to IPv6 (::1). If the server is only reachable
+    // on IPv4, the WS handshake fails. Auto-fallback to 127.0.0.1.
+    if (/^ws:\/\/localhost(:\d+)?/i.test(base)) {
+      out.push(base.replace(/^ws:\/\/localhost/i, "ws://127.0.0.1"));
+    }
+    return Array.from(new Set(out));
+  }, []);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
-    const ws = new WebSocket(WS_URL);
+    const urls = candidateUrls();
+    const attempt = connectAttemptRef.current % urls.length;
+    const url = urls[attempt];
+    connectAttemptRef.current += 1;
+
+    let opened = false;
+    const ws = new WebSocket(url);
     wsRef.current = ws;
-    ws.onopen = () => setConnected(true);
+    ws.onopen = () => {
+      opened = true;
+      setConnected(true);
+    };
     ws.onclose = () => {
       setConnected(false);
       wsRef.current = null;
+      setWsProtocolVersion(null);
+      // If we never opened and we have a fallback URL, try it once automatically.
+      if (!opened && urls.length > 1 && attempt === 0) {
+        onErrorRef.current(`WebSocket failed at ${url}, retrying ${urls[1]}...`);
+        // Re-attempt with next candidate.
+        queueMicrotask(() => connect());
+      }
     };
     ws.onerror = () => {
-      onErrorRef.current("WebSocket connection error");
+      onErrorRef.current(`WebSocket connection error (${url})`);
     };
     ws.onmessage = (ev) => {
       try {
@@ -46,15 +77,28 @@ export function useWebSocket() {
           onErrorRef.current(data.message);
           return;
         }
+        if (data.type === "hello") {
+          setWsProtocolVersion(data.protocolVersion);
+          return;
+        }
         if (data.type === "audio_chunk") {
           onAudioChunkRef.current({
             audioBase64: data.audioBase64,
             audioMimeType: data.audioMimeType,
             visemes: data.visemes,
+            visemeSource: data.visemeSource,
             isLast: data.isLast,
             sentenceIndex: data.sentenceIndex,
             text: data.text,
             isSilence: data.isSilence,
+          });
+          return;
+        }
+        if (data.type === "capabilities") {
+          setCapabilities({
+            alignmentAvailable: data.alignment.available,
+            elevenLabsConfigured: data.tts.elevenLabsConfigured,
+            groqConfigured: data.tts.groqConfigured,
           });
           return;
         }
@@ -71,7 +115,14 @@ export function useWebSocket() {
         onErrorRef.current("Invalid message from server");
       }
     };
-  }, [clearAssistantStream, setAssistantStreamingText, setCurrentEmotion]);
+  }, [
+    candidateUrls,
+    clearAssistantStream,
+    setAssistantStreamingText,
+    setCapabilities,
+    setCurrentEmotion,
+    setWsProtocolVersion,
+  ]);
 
   const disconnect = useCallback(() => {
     wsRef.current?.close();

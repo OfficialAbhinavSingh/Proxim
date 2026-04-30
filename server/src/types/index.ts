@@ -42,6 +42,14 @@ export interface Persona {
   systemPrompt: string;
 }
 
+export type VisemeSource =
+  | "elevenlabs_alignment"
+  | "fallback_text"
+  | "fallback_static";
+
+/** Bump when WS payload shape changes (helps detect stale clients/servers during dev). */
+export const WS_PROTOCOL_VERSION = 2;
+
 export type WsClientMessage =
   | { type: "session_start"; sessionId: string; personaId: string }
   | { type: "session_end"; sessionId: string }
@@ -54,10 +62,16 @@ export type WsClientMessage =
 
 export type WsServerMessage =
   | {
+      type: "hello";
+      protocolVersion: number;
+      service: "proxim-server";
+    }
+  | {
       type: "audio_chunk";
       audioBase64: string;
       audioMimeType: string;
       visemes: VisemeKeyframe[];
+      visemeSource?: VisemeSource;
       isLast: boolean;
       sentenceIndex: number;
       /** Sentence text — used by client for Web Speech Synthesis TTS fallback */
@@ -70,6 +84,12 @@ export type WsServerMessage =
       role: "assistant";
       text: string;
       emotion: Emotion;
+    }
+  | {
+      type: "capabilities";
+      sessionId: string;
+      alignment: { available: boolean };
+      tts: { elevenLabsConfigured: boolean; groqConfigured: boolean };
     }
   | { type: "session_start"; sessionId: string; personaId: string }
   | { type: "session_end"; sessionId: string }

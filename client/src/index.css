@@ -11,4 +11,123 @@ body,
 body {
   margin: 0;
   -webkit-font-smoothing: antialiased;
+  color: rgb(var(--c-fg));
+  background: var(--app-bg);
+  background-attachment: fixed;
+}
+
+:root {
+  /* Light theme — calm clinical neutrals with health-forward cyan/indigo accents */
+  --c-bg: 248 250 252; /* slate-50-ish */
+  --c-fg: 11 18 32; /* deep ink */
+  --c-muted: 70 84 103; /* slate-600-ish */
+  --c-subtle: 122 135 156; /* slate-500-ish */
+  --c-border: 212 221 235; /* soft border */
+  --c-surface: 255 255 255;
+  --c-surface2: 244 247 252;
+  --c-accent: 13 148 136; /* teal-600 */
+  --c-accent2: 37 99 235; /* blue-600 */
+  --c-success: 22 163 74; /* green-600 */
+  --c-danger: 220 38 38; /* red-600 */
+
+  --app-bg:
+    radial-gradient(900px 600px at 18% 12%, rgba(13, 148, 136, 0.18), transparent 55%),
+    radial-gradient(800px 560px at 78% 18%, rgba(37, 99, 235, 0.14), transparent 58%),
+    linear-gradient(180deg, rgb(248 250 252), rgb(241 245 249));
+}
+
+.dark {
+  /* Dark theme — deep navy with restrained, medical-tech gradients (no glow/shadows) */
+  --c-bg: 8 12 20;
+  --c-fg: 231 237 246;
+  --c-muted: 152 164 184;
+  --c-subtle: 124 138 161;
+  --c-border: 31 43 62;
+  --c-surface: 12 18 30;
+  --c-surface2: 16 25 41;
+  --c-accent: 45 212 191; /* teal-400 */
+  --c-accent2: 99 102 241; /* indigo-500 */
+  --c-success: 52 211 153; /* emerald-400 */
+  --c-danger: 248 113 113; /* rose-400 */
+
+  --app-bg:
+    radial-gradient(900px 600px at 18% 12%, rgba(45, 212, 191, 0.16), transparent 58%),
+    radial-gradient(820px 560px at 78% 18%, rgba(99, 102, 241, 0.16), transparent 60%),
+    linear-gradient(180deg, rgb(8 12 20), rgb(10 16 28));
+}
+
+@layer base {
+  ::selection {
+    background: rgba(13, 148, 136, 0.22);
+  }
+  .dark ::selection {
+    background: rgba(45, 212, 191, 0.22);
+  }
+}
+
+@layer components {
+  .app-shell {
+    @apply min-h-screen;
+    color: rgb(var(--c-fg));
+  }
+
+  .topbar {
+    @apply border-b;
+    border-color: rgb(var(--c-border));
+    background-color: rgb(var(--c-surface) / 0.8);
+  }
+
+  .container-app {
+    @apply mx-auto w-full max-w-6xl px-4 md:px-8;
+  }
+
+  .panel {
+    @apply rounded-2xl border;
+    border-color: rgb(var(--c-border));
+    background-color: rgb(var(--c-surface) / 0.7);
+  }
+
+  .panel-strong {
+    @apply rounded-2xl border;
+    border-color: rgb(var(--c-border));
+    background-color: rgb(var(--c-surface2) / 0.8);
+  }
+
+  .kicker {
+    @apply text-[11px] font-semibold uppercase tracking-wide;
+    color: rgb(var(--c-muted));
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold transition;
+    border-color: rgb(var(--c-border));
+    background-color: rgb(var(--c-surface2));
+    color: rgb(var(--c-fg));
+  }
+  .btn:hover {
+    background: color-mix(in srgb, rgb(var(--c-surface2)) 82%, rgb(var(--c-accent)) 18%);
+  }
+  .btn:disabled {
+    @apply cursor-not-allowed opacity-45;
+  }
+
+  .btn-primary {
+    @apply btn border-transparent text-white;
+    background: linear-gradient(100deg, rgb(var(--c-accent)), rgb(var(--c-accent2)));
+  }
+  .btn-primary:hover {
+    filter: saturate(1.06);
+  }
+
+  .btn-danger {
+    @apply btn border-transparent text-white;
+    background: linear-gradient(100deg, rgb(var(--c-danger)), color-mix(in srgb, rgb(var(--c-danger)) 70%, black 30%));
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium;
+    border-color: rgb(var(--c-border));
+    background-color: rgb(var(--c-surface2));
+    color: rgb(var(--c-fg));
+  }
 }

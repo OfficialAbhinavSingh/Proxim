@@ -1,6 +1,6 @@
 # Proxim
 
-Proxim is a browser-based training lab where pharmaceutical sales representatives rehearse live conversations with AI-simulated healthcare professionals. Each persona speaks with streamed Claude dialogue, ElevenLabs speech, and Rhubarb-derived viseme keyframes that drive a Ready Player Me style 3D avatar in Three.js, keeping voice and lip motion tightly coupled for a face-to-face feel without installing native desktop software.
+Proxim is a browser-based training lab where pharmaceutical sales representatives rehearse live conversations with AI-simulated healthcare professionals. Each persona speaks with streamed dialogue, ElevenLabs speech, and timestamp/alignment-derived viseme keyframes that drive a 3D avatar in Three.js, keeping voice and lip motion tightly coupled for a face-to-face feel without native binary installs.
 
 ## Architecture
 
@@ -18,8 +18,8 @@ Proxim is a browser-based training lab where pharmaceutical sales representative
 ┌─────────────────────────────────────────────────────────────────────┐
 │                 Node.js + Express + ws (TypeScript)                  │
 │  user_input ─▶ Claude Sonnet stream ─▶ sentence buffer              │
-│              ─▶ ElevenLabs PCM stream ─▶ WAV ─▶ Rhubarb CLI         │
-│                  (phoneme synthesizer fallback if Rhubarb absent)    │
+│              ─▶ ElevenLabs with-timestamps (audio + alignment)       │
+│                  (text-viseme fallback if alignment unavailable)      │
 │              ─▶ { audio_chunk + visemes } frames over WebSocket      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -27,17 +27,14 @@ Proxim is a browser-based training lab where pharmaceutical sales representative
 ## Repository layout
 
 - `client/` — React 18, TypeScript, Vite, Tailwind, Zustand, React Three Fiber avatar renderer.
-- `server/` — Express HTTP + WebSocket server, Anthropic + ElevenLabs + Rhubarb pipeline.
-- `Dockerfile.server` + `docker-compose.yml` — containerized backend with Rhubarb binary.
-- `scripts/install-rhubarb-windows.ps1` — one-shot Rhubarb installer for Windows dev machines.
+- `server/` — Express HTTP + WebSocket server, Groq/Anthropic + ElevenLabs + alignment-based lip-sync.
+- `Dockerfile.server` + `docker-compose.yml` — containerized backend (no native binaries required).
 
 ## Prerequisites
 
 - Node.js 20+
 - Anthropic API key (`ANTHROPIC_API_KEY`)
 - ElevenLabs API key (`ELEVENLABS_API_KEY`) — voice IDs are pre-configured in `personas.json`
-- **Rhubarb is optional** — if the binary is absent the server falls back to a phoneme-based
-  viseme synthesizer that keeps lips moving for every sentence. Install Rhubarb for production-quality sync.
 - Optional: `OPENAI_API_KEY` for Whisper transcription when Web Speech API is unavailable
 
 ## Setup
@@ -64,25 +61,6 @@ Defaults:
 
 - Client Vite dev server: `http://localhost:5173`
 - Backend HTTP + WS: `http://localhost:3001` / `ws://localhost:3001`
-
-### Installing Rhubarb (optional but recommended)
-
-**Docker** — Rhubarb is installed automatically in `Dockerfile.server`.
-
-**Linux / macOS**:
-```bash
-# Download the appropriate release from:
-# https://github.com/DanielSWolf/rhubarb-lip-sync/releases
-chmod +x rhubarb
-sudo mv rhubarb /usr/local/bin/
-# Then in server/.env:  RHUBARB_PATH=/usr/local/bin/rhubarb
-```
-
-**Windows**:
-```powershell
-# Installs to C:\rhubarb\rhubarb.exe and prints the RHUBARB_PATH line to add to .env
-powershell -ExecutionPolicy Bypass -File scripts\install-rhubarb-windows.ps1
-```
 
 ## Docker (backend only)
 
@@ -118,7 +96,7 @@ All three use distinct Ready Player Me GLBs loaded via HTTPS — no local asset 
 ## Known limitations
 
 - **Binary WebSocket frames**: audio is base64-encoded inside JSON for portability; high-throughput deployments should switch to length-prefixed binary frames.
-- **Sentence-first TTS**: the server buffers Claude output into speakable sentences (punctuation or ~220 chars) before ElevenLabs + Rhubarb run; this trades a little latency for reliable lip-sync windows.
+- **Sentence-first TTS**: the server buffers model output into speakable sentences (punctuation or ~220 chars) before ElevenLabs runs; this trades a little latency for stable sync windows.
 - **Whisper fallback**: requires `OPENAI_API_KEY` and is only used when Web Speech API / MediaRecorder path hits `/session/transcribe`.
 - **Emotion blend shapes**: RPM models expose standard visemes; custom `emotion_*` morphs may be absent on some assets — weights then simply no-op.
 - **Mobile Safari**: Web Speech support varies; tap-to-speak + Whisper is the safest fallback.
@@ -128,7 +106,6 @@ All three use distinct Ready Player Me GLBs loaded via HTTPS — no local asset 
 - [Anthropic](https://www.anthropic.com/) — Claude API (see Anthropic Terms of Service).
 - [ElevenLabs](https://elevenlabs.io/) — Text-to-speech streaming (see ElevenLabs Terms).
 - [OpenAI](https://openai.com/) — Optional Whisper transcription.
-- [Rhubarb Lip Sync](https://github.com/DanielSWolf/rhubarb-lip-sync) — GPL-3.0 licensed CLI used server-side for viseme timing. Usage is server-side only; the Rhubarb binary is not distributed with this repository.
 - [Ready Player Me](https://readyplayer.me/) — Avatar GLB models served via CDN.
 
 ## License

@@ -1,17 +1,20 @@
 import { useCallback, useRef } from "react";
 import { useAvatarStore } from "../store/avatarStore";
-import type { VisemeKeyframe } from "../types";
+import type { VisemeKeyframe, VisemeSource } from "../types";
 
 type QueueItem = {
   audioBase64: string;
   audioMimeType: string;
   visemes: VisemeKeyframe[];
+  visemeSource?: VisemeSource;
   isLast: boolean;
   sentenceIndex: number;
   /** Sentence text for Web Speech Synthesis fallback when TTS audio is silent */
   text?: string;
   /** True when the server sent silence because ElevenLabs/Groq TTS is unavailable */
   isSilence?: boolean;
+  /** performance.now() when this chunk was received by client */
+  receivedAt?: number;
 };
 
 /**
@@ -41,7 +44,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
    * Speak text via Web Speech Synthesis (browser-native, free, works offline).
    * Returns a Promise that resolves when speaking ends.
    */
-  function speakWithWebSpeech(text: string): Promise<void> {
+  function speakWithWebSpeech(text: string, onStart?: () => void): Promise<void> {
     return new Promise((resolve) => {
       if (!("speechSynthesis" in window) || !text.trim()) {
         resolve();
@@ -66,6 +69,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
       utterance.pitch = 1.05;
       utterance.volume = 1.0;
 
+      utterance.onstart = () => onStart?.();
       utterance.onend = () => resolve();
       utterance.onerror = () => resolve();
 
@@ -79,15 +83,19 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
     if (!next) return;
     playingRef.current = true;
 
-    const startAt = performance.now();
-    useAvatarStore.getState().setVisemeTrack(next.visemes, startAt);
-
     try {
       if (next.isSilence && next.text?.trim()) {
         // ── Silence fallback path ──
         // Use Web Speech Synthesis for voice + let viseme track run for the
         // natural speech duration (Web Speech handles its own timing).
-        await speakWithWebSpeech(next.text);
+        await speakWithWebSpeech(next.text, () => {
+          useAvatarStore.getState().setVisemeTrack(next.visemes, performance.now(), {
+            sentenceIndex: next.sentenceIndex,
+            isSilence: !!next.isSilence,
+            visemeSource: next.visemeSource ?? null,
+            receivedAt: next.receivedAt ?? null,
+          });
+        });
       } else {
         // ── Real audio path (ElevenLabs or Groq WAV) ──
         const ctx = await ensureCtx();
@@ -104,14 +112,35 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
           src.buffer = buffer;
           src.connect(ctx.destination);
           src.onended = () => resolve();
-          src.start(0);
+          // Schedule slightly ahead to reduce jitter and align visemes to playback start.
+          const leadSec = 0.005;
+          const when = ctx.currentTime + leadSec;
+          const perfStart = performance.now() + leadSec * 1000;
+          const st = useAvatarStore.getState();
+          const meta = {
+            sentenceIndex: next.sentenceIndex,
+            isSilence: !!next.isSilence,
+            visemeSource: next.visemeSource ?? null,
+            receivedAt: next.receivedAt ?? null,
+          };
+          // If the track was already started on receive, only update start time to sync with audio.
+          if (st.visemes?.length) st.setChunkStartedAt(perfStart, meta);
+          else st.setVisemeTrack(next.visemes, perfStart, meta);
+          src.start(when);
         });
       }
     } catch {
       // If Web Audio decoding fails, also try Web Speech as last resort.
       if (next.text?.trim()) {
         try {
-          await speakWithWebSpeech(next.text);
+          await speakWithWebSpeech(next.text, () => {
+            useAvatarStore.getState().setVisemeTrack(next.visemes, performance.now(), {
+              sentenceIndex: next.sentenceIndex,
+              isSilence: !!next.isSilence,
+              visemeSource: next.visemeSource ?? null,
+              receivedAt: next.receivedAt ?? null,
+            });
+          });
         } catch {
           // ignore
         }

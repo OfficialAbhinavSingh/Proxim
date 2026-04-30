@@ -1,23 +1,84 @@
 import { create } from "zustand";
-import type { VisemeKeyframe, VisemeKey } from "../types";
+import type { VisemeKeyframe, VisemeKey, VisemeSource } from "../types";
 
 export interface AvatarPlaybackState {
   /** performance.now() when current viseme timeline started */
   chunkStartedAt: number | null;
   visemes: VisemeKeyframe[];
+  lastChunk: {
+    sentenceIndex: number | null;
+    isSilence: boolean | null;
+    visemeSource: VisemeSource | null;
+    receivedAt: number | null;
+  };
+  /** How many morph targets on the selected mesh look like Oculus visemes (best-effort). */
+  visemeMorphCount: number | null;
+  morphHost: {
+    meshName: string | null;
+    morphKeySample: string[];
+    totalMorphTargets: number | null;
+  };
+  avatarAsset: {
+    resolvedUrl: string | null;
+    loadError: string | null;
+    loadedAt: number | null;
+  };
 }
 
 interface AvatarStore extends AvatarPlaybackState {
-  setVisemeTrack: (visemes: VisemeKeyframe[], chunkStartedAt: number) => void;
+  setVisemeTrack: (
+    visemes: VisemeKeyframe[],
+    chunkStartedAt: number,
+    meta?: Partial<AvatarPlaybackState["lastChunk"]>
+  ) => void;
+  /**
+   * Update only the playback start time. Used to align viseme timeline
+   * to actual audio playback once it begins (without replacing frames).
+   */
+  setChunkStartedAt: (
+    chunkStartedAt: number,
+    meta?: Partial<AvatarPlaybackState["lastChunk"]>
+  ) => void;
+  /** Update chunk metadata without starting playback timing (used for diagnostics). */
+  setLastChunkMeta: (meta: Partial<AvatarPlaybackState["lastChunk"]>) => void;
+  setMorphInventory: (visemeMorphCount: number | null) => void;
+  setMorphHostInfo: (info: Partial<AvatarPlaybackState["morphHost"]>) => void;
+  setAvatarAssetInfo: (info: Partial<AvatarPlaybackState["avatarAsset"]>) => void;
   clearVisemeTrack: () => void;
 }
 
 export const useAvatarStore = create<AvatarStore>((set) => ({
   chunkStartedAt: null,
   visemes: [],
+  lastChunk: { sentenceIndex: null, isSilence: null, visemeSource: null, receivedAt: null },
+  visemeMorphCount: null,
+  morphHost: { meshName: null, morphKeySample: [], totalMorphTargets: null },
+  avatarAsset: { resolvedUrl: null, loadError: null, loadedAt: null },
 
-  setVisemeTrack: (visemes, chunkStartedAt) => set({ visemes, chunkStartedAt }),
-  clearVisemeTrack: () => set({ visemes: [], chunkStartedAt: null }),
+  setVisemeTrack: (visemes, chunkStartedAt, meta) =>
+    set((s) => ({
+      visemes,
+      chunkStartedAt,
+      lastChunk: { ...s.lastChunk, ...(meta ?? {}) },
+    })),
+  setChunkStartedAt: (chunkStartedAt, meta) =>
+    set((s) => ({
+      chunkStartedAt,
+      lastChunk: { ...s.lastChunk, ...(meta ?? {}) },
+    })),
+  setLastChunkMeta: (meta) => set((s) => ({ lastChunk: { ...s.lastChunk, ...meta } })),
+  setMorphInventory: (visemeMorphCount) => set({ visemeMorphCount }),
+  setMorphHostInfo: (info) => set((s) => ({ morphHost: { ...s.morphHost, ...info } })),
+  setAvatarAssetInfo: (info) => set((s) => ({ avatarAsset: { ...s.avatarAsset, ...info } })),
+  clearVisemeTrack: () =>
+    set({
+      visemes: [],
+      chunkStartedAt: null,
+      lastChunk: { sentenceIndex: null, isSilence: null, visemeSource: null, receivedAt: null },
+      visemeMorphCount: null,
+      morphHost: { meshName: null, morphKeySample: [], totalMorphTargets: null },
+      avatarAsset: { resolvedUrl: null, loadError: null, loadedAt: null },
+    }),
 }));
 
 /** RPM / Oculus viseme morph target naming convention */

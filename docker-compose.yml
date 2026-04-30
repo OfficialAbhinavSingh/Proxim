@@ -9,5 +9,4 @@ services:
       - ./server/.env
     environment:
       - PORT=3001
-      - RHUBARB_PATH=/usr/local/bin/rhubarb
       - PERSONAS_PATH=/app/dist/config/personas.json

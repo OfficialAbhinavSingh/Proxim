@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 
-/** Wrap raw PCM s16le mono in a WAV container for Rhubarb and browser decode. */
+/** Wrap raw PCM s16le mono in a WAV container for browser decode. */
 export function pcmToWav(pcm: Buffer, sampleRate: number, channels = 1): Buffer {
   const bitsPerSample = 16;
   const blockAlign = (channels * bitsPerSample) / 8;

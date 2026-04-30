@@ -14,6 +14,13 @@ export interface SessionState {
   /** User has performed a gesture that unlocks audio (mobile autoplay). */
   audioUnlocked: boolean;
   sidebarOpen: boolean;
+  /** Latest WS hello protocolVersion from server (null until connected). */
+  wsProtocolVersion: number | null;
+  capabilities: {
+    alignmentAvailable: boolean | null;
+    elevenLabsConfigured: boolean | null;
+    groqConfigured: boolean | null;
+  };
 
   setPersonaId: (id: string | null) => void;
   setSessionId: (id: string | null) => void;
@@ -29,6 +36,8 @@ export interface SessionState {
   setMicError: (e: string | null) => void;
   setAudioUnlocked: (v: boolean) => void;
   toggleSidebar: () => void;
+  setCapabilities: (c: SessionState["capabilities"]) => void;
+  setWsProtocolVersion: (v: number | null) => void;
   resetSession: () => void;
 }
 
@@ -44,6 +53,12 @@ export const useSessionStore = create<SessionState>((set) => ({
   micError: null,
   audioUnlocked: false,
   sidebarOpen: true,
+  wsProtocolVersion: null,
+  capabilities: {
+    alignmentAvailable: null,
+    elevenLabsConfigured: null,
+    groqConfigured: null,
+  },
 
   setPersonaId: (personaId) => set({ personaId }),
   setSessionId: (sessionId) => set({ sessionId }),
@@ -72,6 +87,8 @@ export const useSessionStore = create<SessionState>((set) => ({
   setMicError: (micError) => set({ micError }),
   setAudioUnlocked: (audioUnlocked) => set({ audioUnlocked }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
+  setCapabilities: (capabilities) => set({ capabilities }),
+  setWsProtocolVersion: (wsProtocolVersion) => set({ wsProtocolVersion }),
   resetSession: () =>
     set({
       sessionId: null,
@@ -82,6 +99,12 @@ export const useSessionStore = create<SessionState>((set) => ({
       assistantStreamingText: "",
       currentEmotion: "neutral",
       micError: null,
+      wsProtocolVersion: null,
+      capabilities: {
+        alignmentAvailable: null,
+        elevenLabsConfigured: null,
+        groqConfigured: null,
+      },
     }),
 }));
 

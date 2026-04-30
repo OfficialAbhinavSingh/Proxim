@@ -43,6 +43,3 @@ _tmp/
 *.glb
 tmp/
 
-# Rhubarb binary (installed locally, not committed)
-rhubarb.exe
-rhubarb

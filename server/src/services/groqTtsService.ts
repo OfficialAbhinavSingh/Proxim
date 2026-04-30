@@ -18,8 +18,9 @@ export async function synthesizeSentenceToWavWithGroq(
 
   const client = new Groq({ apiKey });
   const res = await client.audio.speech.create({
-    model: "canopylabs/orpheus-3b-0.1-ft",
-    voice: voice || "tara",   // Orpheus voices: tara, leo, leah, dan, mia, zac, jess
+    model: "canopylabs/orpheus-v1-english",
+    // Orpheus voice IDs are different from PlayAI. Use a sensible default.
+    voice: voice || "austin",
     input: text,
     response_format: "wav",
   } as Parameters<typeof client.audio.speech.create>[0]);

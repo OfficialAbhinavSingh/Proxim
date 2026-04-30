@@ -4,10 +4,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Emotion, Message, Persona, WsClientMessage, WsServerMessage } from "../types/index.js";
 import { streamClaudeResponse, stripEmotionTag } from "../services/claudeService.js";
-import { synthesizeSentenceToPcm } from "../services/elevenLabsService.js";
+import { synthesizeSentenceWithTimestamps } from "../services/elevenLabsService.js";
 import { synthesizeSentenceToWavWithGroq } from "../services/groqTtsService.js";
-import { generateVisemes, synthesizeVisemesFromText } from "../services/rhubarbService.js";
-import { bufferToBase64, makeSilenceWavForDuration, minimalSilenceWav, pcmToWav } from "../services/audioService.js";
+import { bufferToBase64, makeSilenceWavForDuration, minimalSilenceWav } from "../services/audioService.js";
+import { synthesizeVisemesFromText } from "../services/visemeFallbackService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -38,10 +38,11 @@ function splitLeadingSentence(buffer: string): { sentence: string | null; rest: 
     const rest = trimmed.slice(end).trimStart();
     if (sentence.length >= 2) return { sentence, rest };
   }
-  if (trimmed.length >= 220) {
-    const slice = trimmed.slice(0, 220);
+  // Lower threshold to reduce perceived latency: emit shorter TTS chunks sooner.
+  if (trimmed.length >= 120) {
+    const slice = trimmed.slice(0, 120);
     const li = slice.lastIndexOf(" ");
-    if (li > 80) {
+    if (li > 40) {
       const sentence = trimmed.slice(0, li).trim();
       const rest = trimmed.slice(li).trimStart();
       return { sentence, rest };
@@ -64,41 +65,45 @@ export function createWsHandler() {
     isLast: boolean
   ) {
     const elevenKey = process.env.ELEVENLABS_API_KEY;
-    const rhubarbPath = process.env.RHUBARB_PATH;
     const groqKey = process.env.GROQ_API_KEY;
-    const groqVoice = process.env.GROQ_TTS_VOICE || "Fritz-PlayAI";
-    let wav: Buffer | null = null;         // null = no real audio yet
+    const groqVoice = process.env.GROQ_TTS_VOICE || "austin";
+    let wav: Buffer | null = null; // WAV fallback path (Groq/silence)
+    let audioBase64: string | null = null; // ElevenLabs path (mp3 base64)
+    let audioMimeType: string = "audio/wav";
     let isSilence = false;
-    // Default to text-based visemes so lips always move even if audio is silent.
-    // If we later obtain real speech audio, we replace this with Rhubarb-derived visemes.
     let visemes = synthesizeVisemesFromText(sentence);
+    let visemeSource: "elevenlabs_alignment" | "fallback_text" | "fallback_static" = "fallback_text";
 
-    try {
-      const { pcm, sampleRate } = await synthesizeSentenceToPcm(elevenKey, persona.voiceId, sentence);
-      if (pcm.length > 0) {
-        wav = pcmToWav(pcm, sampleRate, 1);
-        // Pass sentence text so phoneme synthesizer can be used if Rhubarb fails.
-        visemes = await generateVisemes(rhubarbPath, wav, sentence);
-      }
-      // If pcm is empty, ElevenLabs not configured — fall through to Groq below.
-    } catch (err) {
-      console.warn("[TTS] ElevenLabs failed, trying Groq:", err instanceof Error ? err.message : err);
-    }
-
-    if (!wav) {
-      // Try Groq TTS fallback.
+    // Prefer Groq WAV TTS first for low-latency and to avoid ElevenLabs free-plan API limitations.
+    // ElevenLabs alignment is great when it works; we try it only if Groq isn't available.
+    if (groqKey) {
       try {
         const groqWav = await synthesizeSentenceToWavWithGroq(groqKey, groqVoice, sentence);
         if (groqWav.length > 0) {
           wav = groqWav;
-          visemes = await generateVisemes(rhubarbPath, wav, sentence);
+          visemes = synthesizeVisemesFromText(sentence);
+          visemeSource = "fallback_text";
         }
       } catch (err2) {
-        console.warn("[TTS] Groq TTS failed:", err2 instanceof Error ? err2.message : err2);
+        console.warn("[TTS] Groq TTS failed, trying ElevenLabs:", err2 instanceof Error ? err2.message : err2);
       }
     }
 
     if (!wav) {
+      try {
+        const res = await synthesizeSentenceWithTimestamps(elevenKey, persona.voiceId, sentence);
+        if (res.audioBase64) {
+          audioBase64 = res.audioBase64;
+          audioMimeType = res.audioMimeType;
+          visemes = res.visemes;
+          visemeSource = res.source;
+        }
+      } catch (err) {
+        console.warn("[TTS] ElevenLabs failed:", err instanceof Error ? err.message : err);
+      }
+    }
+
+    if (!audioBase64 && !wav) {
       // Both TTS providers failed — send silence whose duration matches the viseme
       // track so the avatar has time to animate its mouth before the chunk ends.
       isSilence = true;
@@ -110,9 +115,10 @@ export function createWsHandler() {
 
     safeSend(ws, {
       type: "audio_chunk",
-      audioBase64: bufferToBase64(wav),
-      audioMimeType: "audio/wav",
+      audioBase64: audioBase64 ?? bufferToBase64(wav ?? minimalSilenceWav()),
+      audioMimeType: audioBase64 ? audioMimeType : "audio/wav",
       visemes,
+      visemeSource,
       isLast,
       sentenceIndex,
       text: sentence,
@@ -263,6 +269,15 @@ export function createWsHandler() {
         type: "session_start",
         sessionId: msg.sessionId,
         personaId: msg.personaId,
+      });
+      safeSend(ws, {
+        type: "capabilities",
+        sessionId: msg.sessionId,
+        alignment: { available: !!process.env.ELEVENLABS_API_KEY },
+        tts: {
+          elevenLabsConfigured: !!process.env.ELEVENLABS_API_KEY,
+          groqConfigured: !!process.env.GROQ_API_KEY,
+        },
       });
       await sendIntro(ws, persona);
       const intro = stripEmotionTag(

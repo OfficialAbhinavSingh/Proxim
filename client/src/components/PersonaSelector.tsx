@@ -21,16 +21,36 @@ export function PersonaSelector({ personas, selectedId, onSelect, disabled }: Pe
             className={[
               "rounded-2xl border p-4 text-left transition",
               active
-                ? "border-proxim-accent bg-proxim-800/80 shadow-lg shadow-blue-500/10 ring-1 ring-proxim-accent/40"
-                : "border-white/10 bg-proxim-900/40 hover:border-white/20 hover:bg-proxim-800/50",
+                ? "border-accent/60 bg-surface2/85"
+                : "border-border bg-surface/70 hover:bg-surface2/70",
               disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer",
             ].join(" ")}
           >
-            <p className="font-display text-lg font-semibold text-white">{p.name}</p>
-            <p className="mt-1 text-sm text-sky-200/90">{p.specialty}</p>
-            <p className="mt-2 line-clamp-2 text-xs text-slate-400">{p.hospital}</p>
-            <p className="mt-2 line-clamp-2 text-xs italic text-slate-500">{p.personality}</p>
-            <p className="mt-2 text-[10px] uppercase tracking-wide text-slate-600">Mood: {p.mood}</p>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-display text-lg font-semibold text-fg">{p.name}</p>
+                <p className="mt-1 text-sm" style={{ color: "rgb(var(--c-accent2))" }}>
+                  {p.specialty}
+                </p>
+              </div>
+              {active ? (
+                <span
+                  className="chip"
+                  style={{
+                    borderColor: "transparent",
+                    background: "rgb(var(--c-accent) / 0.14)",
+                    color: "rgb(var(--c-accent))",
+                  }}
+                >
+                  Selected
+                </span>
+              ) : null}
+            </div>
+            <p className="mt-2 line-clamp-2 text-xs text-muted">{p.hospital}</p>
+            <p className="mt-2 line-clamp-2 text-xs italic text-muted/80">{p.personality}</p>
+            <p className="mt-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+              Mood: {p.mood}
+            </p>
           </button>
         );
       })}

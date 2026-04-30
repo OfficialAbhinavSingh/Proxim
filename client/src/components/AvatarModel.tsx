@@ -5,6 +5,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useAvatarMorphs, useAvatarIdleClock, useAvatarTrackSubscription } from "../hooks/useAvatar";
 import { useSessionStore } from "../store/sessionStore";
+import { useAvatarStore } from "../store/avatarStore";
 import { KTX2Loader } from "three-stdlib";
 import type { VisemeKeyframe, VisemeKey } from "../types";
 
@@ -21,7 +22,37 @@ function findMorphHost(root: THREE.Object3D): { mesh: MorphHost; dict: Record<st
     const infl = m.morphTargetInfluences;
     if (!dict || !infl) return;
     const keys = Object.keys(dict);
-    const score = keys.filter((k) => k.startsWith("viseme_")).length;
+    const lower = keys.map((k) => k.toLowerCase());
+    const visemeCount = lower.filter((k) => k.startsWith("viseme_") || k.includes("viseme")).length;
+    // Many GLBs (ARKit / MetaHuman / Apple blendshapes) don't have `viseme_*` but do have mouth/jaw shapes.
+    const mouthCount = lower.filter(
+      (k) =>
+        k.includes("mouth") ||
+        k.includes("jaw") ||
+        k.includes("lip") ||
+        k.includes("smile") ||
+        k.includes("funnel") ||
+        k.includes("pucker")
+    ).length;
+    const blinkCount = lower.filter((k) => k.includes("blink") || k.includes("eyeclose") || k.includes("eye_close")).length;
+    const emotionCount = lower.filter((k) => k.startsWith("emotion_")).length;
+    // Prefer meshes that look like a face:
+    // - Strongly prefer visemes
+    // - Prefer head/face meshes over eyes/teeth (RPM often has separate EyeLeft/EyeRight meshes)
+    const name = (m.name || "").toLowerCase();
+    const isHeadLike = /head|face|wolf3d|avatar/i.test(name);
+    const isEyeLike = /eye|eyelash|brow/i.test(name);
+    const isTeethLike = /teeth|tongue/i.test(name);
+
+    // Base score from morph inventory.
+    let score = visemeCount * 100 + mouthCount * 6 + blinkCount * 2 + emotionCount;
+    // Name-based priors.
+    if (isHeadLike) score += 5000;
+    if (isTeethLike) score -= 500; // teeth meshes can have mouthOpen etc but not the full face
+    if (isEyeLike) score -= 8000; // avoid selecting eye meshes even if they expose some viseme keys
+
+    // Hard requirement: if it has viseme keys but also looks like an eye, don't pick it.
+    if (isEyeLike && visemeCount > 0) score -= 20000;
     if (score > bestScore) {
       bestScore = score;
       picked = { mesh: m as MorphHost, dict };
@@ -85,6 +116,10 @@ function AvatarModelInner({
   fallback?: ReactNode;
 }) {
   const gl = useThree((s) => s.gl);
+  // Record the resolved URL so diagnostics can confirm what we attempted to load.
+  useEffect(() => {
+    useAvatarStore.getState().setAvatarAssetInfo({ resolvedUrl: url, loadError: null });
+  }, [url]);
 
   // Ready Player Me GLBs commonly use KTX2/Basis textures (KHR_texture_basisu).
   // Configure KTX2Loader per renderer, and attach it to GLTFLoader via drei's extendLoader.
@@ -118,6 +153,11 @@ function AvatarModelInner({
     if (e instanceof Promise) throw e;
     // Otherwise it's a real error — render fallback without setState during render.
     console.warn("[AvatarModel] GLB load failed:", e);
+    useAvatarStore.getState().setAvatarAssetInfo({
+      resolvedUrl: url,
+      loadError: e instanceof Error ? e.message : String(e),
+      loadedAt: null,
+    });
     return <>{fallback ?? null}</>;
   }
 
@@ -129,8 +169,35 @@ function AvatarModelInner({
   );
 
   useLayoutEffect(() => {
-    setMorphHost(findMorphHost(clone));
+    const host = findMorphHost(clone);
+    setMorphHost(host);
+    if (!host) {
+      useAvatarStore.getState().setMorphInventory(0);
+      useAvatarStore.getState().setMorphHostInfo({
+        meshName: null,
+        morphKeySample: [],
+        totalMorphTargets: 0,
+      });
+      return;
+    }
+    const keys = Object.keys(host.dict);
+    const count = keys.filter((k) => /^viseme_/i.test(k) || /^Viseme_/i.test(k) || /viseme/i.test(k)).length;
+    useAvatarStore.getState().setMorphInventory(count);
+    useAvatarStore.getState().setMorphHostInfo({
+      meshName: host.mesh.name || "(unnamed-mesh)",
+      morphKeySample: keys.slice(0, 35),
+      totalMorphTargets: keys.length,
+    });
   }, [clone]);
+
+  // Mark successful load for diagnostics.
+  useEffect(() => {
+    useAvatarStore.getState().setAvatarAssetInfo({
+      resolvedUrl: url,
+      loadError: null,
+      loadedAt: Date.now(),
+    });
+  }, [url]);
 
   // Auto-frame: center model & scale to consistent height so camera shows full body.
   useLayoutEffect(() => {
@@ -149,7 +216,13 @@ function AvatarModelInner({
     // Move model so it's centered on X/Z, and its feet are near our shadow plane.
     // Many humanoid rigs have origin at feet; others are centered. Using bbox minY is robust.
     g.scale.setScalar(scale);
-    g.position.set(-center.x * scale, (-box.min.y * scale) - 1.25, -center.z * scale);
+    // Previous hard-coded offset (-1.25) worked for one demo GLB but pushes RPM avatars far below frame.
+    // Place feet near y=-1.25 only when the model would otherwise float too high.
+    const feetY = -box.min.y * scale;
+    const desiredFeetY = -1.25;
+    // Clamp keeps the avatar from sinking out of view while still sitting nicely on the shadow plane.
+    const y = THREE.MathUtils.clamp(feetY, desiredFeetY - 0.2, desiredFeetY + 1.2);
+    g.position.set(-center.x * scale, y, -center.z * scale);
   }, [clone]);
 
   const { applyFrame } = useAvatarMorphs(morphHost?.dict);
@@ -168,11 +241,12 @@ function AvatarModelInner({
     const head =
       findFirstBoneByName(root, [/^head$/i, /head/i]) ??
       findFirstBoneByName(root, [/neck/i, /spine.*3/i, /spine.*2/i, /spine/i]);
-    const spine = findFirstBoneByName(root, [/spine/i, /chest/i, /upperchest/i, /hips/i]);
-    const lArm = findFirstBoneByName(root, [/leftarm/i, /l.*upperarm/i, /^arm_l/i, /upperarm_l/i]);
-    const rArm = findFirstBoneByName(root, [/rightarm/i, /r.*upperarm/i, /^arm_r/i, /upperarm_r/i]);
-    const lFore = findFirstBoneByName(root, [/leftforearm/i, /l.*forearm/i, /^forearm_l/i, /lowerarm_l/i]);
-    const rFore = findFirstBoneByName(root, [/rightforearm/i, /r.*forearm/i, /^forearm_r/i, /lowerarm_r/i]);
+    const spine = findFirstBoneByName(root, [/spine/i, /chest/i, /upperchest/i, /hips/i, /^hips$/i]);
+    // RPM rigs commonly use LeftShoulder/LeftArm/LeftForeArm naming.
+    const lArm = findFirstBoneByName(root, [/leftshoulder/i, /leftarm/i, /leftupperarm/i, /l.*upperarm/i, /^arm_l/i, /upperarm_l/i]);
+    const rArm = findFirstBoneByName(root, [/rightshoulder/i, /rightarm/i, /rightupperarm/i, /r.*upperarm/i, /^arm_r/i, /upperarm_r/i]);
+    const lFore = findFirstBoneByName(root, [/leftforearm/i, /leftlowerarm/i, /l.*forearm/i, /^forearm_l/i, /lowerarm_l/i]);
+    const rFore = findFirstBoneByName(root, [/rightforearm/i, /rightlowerarm/i, /r.*forearm/i, /^forearm_r/i, /lowerarm_r/i]);
     return { head, spine, lArm, rArm, lFore, rFore };
   }, [clone]);
 
@@ -199,14 +273,16 @@ function AvatarModelInner({
 
   useFrame((_, dt) => {
     const g = group.current;
-    if (!g || !morphHost) return;
-    const infl = morphHost.mesh.morphTargetInfluences;
-    if (!infl) return;
+    if (!g) return;
+
+    const infl = morphHost?.mesh.morphTargetInfluences;
 
     const elapsed =
       chunkStartedAt != null ? Math.max(0, (performance.now() - chunkStartedAt) / 1000) : 0;
     const frames = visemes.length ? visemes : [{ time: 0, viseme: "sil" as const, weight: 0 }];
-    applyFrame(infl, elapsed, frames, currentEmotion);
+    if (infl && morphHost) {
+      applyFrame(infl, elapsed, frames, currentEmotion);
+    }
 
     // Speaking intensity (0..1) from current viseme frame.
     const { key, weight } = pickVisemeAtTime(frames, elapsed);
@@ -220,9 +296,9 @@ function AvatarModelInner({
     // - While speaking: arm gestures get stronger.
     const t = performance.now() / 1000;
     const gesture = THREE.MathUtils.smoothstep(speaking, 0.05, 0.65);
-    const breathe = Math.sin(t * Math.PI * 2 * 0.22) * THREE.MathUtils.degToRad(1.2);
-    const sway = Math.sin(t * Math.PI * 2 * 0.12) * THREE.MathUtils.degToRad(1.5);
-    const talkBob = Math.sin(t * Math.PI * 2 * (1.6 + gesture * 0.4)) * THREE.MathUtils.degToRad(1.0) * gesture;
+    const breathe = Math.sin(t * Math.PI * 2 * 0.22) * THREE.MathUtils.degToRad(2.2);
+    const sway = Math.sin(t * Math.PI * 2 * 0.12) * THREE.MathUtils.degToRad(2.6);
+    const talkBob = Math.sin(t * Math.PI * 2 * (1.6 + gesture * 0.4)) * THREE.MathUtils.degToRad(2.0) * gesture;
 
     const applyBone = (bone: THREE.Bone | null, base: THREE.Euler | undefined, dx: number, dy: number, dz: number) => {
       if (!bone || !base) return;
@@ -234,9 +310,9 @@ function AvatarModelInner({
     applyBone(bones.spine, restRot.current.spine, breathe + talkBob * 0.5, sway * 0.4, sway * 0.25);
 
     // Arms: small idle motion, bigger gestures when speaking.
-    const armSwing = Math.sin(t * Math.PI * 2 * 0.35) * THREE.MathUtils.degToRad(2.2);
-    const gestureLift = THREE.MathUtils.degToRad(10) * gesture;
-    const gestureOut = THREE.MathUtils.degToRad(6) * gesture * Math.sin(t * Math.PI * 2 * 0.55);
+    const armSwing = Math.sin(t * Math.PI * 2 * 0.35) * THREE.MathUtils.degToRad(3.6);
+    const gestureLift = THREE.MathUtils.degToRad(16) * gesture;
+    const gestureOut = THREE.MathUtils.degToRad(10) * gesture * Math.sin(t * Math.PI * 2 * 0.55);
     applyBone(bones.lArm, restRot.current.lArm, armSwing - gestureLift * 0.7, -gestureOut * 0.25, gestureOut * 0.35);
     applyBone(bones.rArm, restRot.current.rArm, -armSwing - gestureLift * 0.7, gestureOut * 0.25, -gestureOut * 0.35);
 

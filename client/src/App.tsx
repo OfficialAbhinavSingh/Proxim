@@ -4,11 +4,15 @@ import { PersonaSelector } from "./components/PersonaSelector";
 import { SessionControls } from "./components/SessionControls";
 import { Transcript } from "./components/Transcript";
 import { VoiceInput } from "./components/VoiceInput";
+import { LipSyncDiagnostics } from "./components/LipSyncDiagnostics";
+import { ThemeToggle } from "./components/ThemeToggle";
 import { useAudioPlayback } from "./hooks/useAudioPlayback";
 import { useSession } from "./hooks/useSession";
+import { useTheme } from "./hooks/useTheme";
 import { useVoiceInput } from "./hooks/useVoiceInput";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useSessionStore } from "./store/sessionStore";
+import { useAvatarStore } from "./store/avatarStore";
 
 export default function App() {
   const {
@@ -33,6 +37,7 @@ export default function App() {
   const micError = useSessionStore((s) => s.micError);
   const audioUnlocked = useSessionStore((s) => s.audioUnlocked);
   const setAudioUnlocked = useSessionStore((s) => s.setAudioUnlocked);
+  const capabilities = useSessionStore((s) => s.capabilities);
 
   const {
     connected,
@@ -45,6 +50,8 @@ export default function App() {
   } = useWebSocket();
 
   const [awaitingWsStart, setAwaitingWsStart] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const { theme, toggleTheme } = useTheme();
 
   const { enqueue, ensureCtx } = useAudioPlayback(() => {
     completeAssistantTurn();
@@ -73,14 +80,35 @@ export default function App() {
 
   useEffect(() => {
     setOnAudioChunk((chunk) => {
+      // Diagnostics: record chunk metadata as soon as it arrives (playback may start later).
+      const receivedAt = performance.now();
+      useAvatarStore.getState().setLastChunkMeta({
+        sentenceIndex: chunk.sentenceIndex,
+        isSilence: !!chunk.isSilence,
+        visemeSource: chunk.visemeSource ?? null,
+        receivedAt,
+      });
+
+      // Start viseme timeline immediately for responsiveness (mouth moves right away),
+      // then `useAudioPlayback` will re-align `chunkStartedAt` to the real audio start.
+      if (chunk.visemes?.length) {
+        useAvatarStore.getState().setVisemeTrack(chunk.visemes, receivedAt, {
+          sentenceIndex: chunk.sentenceIndex,
+          isSilence: !!chunk.isSilence,
+          visemeSource: chunk.visemeSource ?? null,
+          receivedAt,
+        });
+      }
       enqueue({
         audioBase64: chunk.audioBase64,
         audioMimeType: chunk.audioMimeType,
         visemes: chunk.visemes,
+        visemeSource: chunk.visemeSource,
         isLast: chunk.isLast,
         sentenceIndex: chunk.sentenceIndex,
         text: chunk.text,
         isSilence: chunk.isSilence,
+        receivedAt,
       });
     });
     setOnTranscriptUpdate(() => {
@@ -123,30 +151,31 @@ export default function App() {
   }, [disconnect]);
 
   return (
-    <div className="flex min-h-screen flex-col bg-proxim-950 text-slate-100">
-      <header className="border-b border-white/10 bg-proxim-900/40 px-4 py-4 backdrop-blur md:px-8">
-        <div className="mx-auto flex max-w-6xl flex-col gap-4 md:flex-row md:items-center md:justify-between">
+    <div className="app-shell flex flex-col">
+      <header className="topbar px-4 py-4 md:px-8">
+        <div className="container-app flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
-            <p className="font-display text-2xl font-bold tracking-tight text-white">Proxim</p>
-            <p className="text-sm text-slate-400">
-              Real-time AI HCP roleplay for pharmaceutical sales training
-            </p>
+            <p className="font-display text-2xl font-bold tracking-tight">Proxim</p>
+            <p className="text-sm text-muted">Real-time AI HCP roleplay for pharmaceutical sales training</p>
           </div>
-          <SessionControls
-            active={isSessionActive}
-            elapsedSec={elapsedSec}
-            canStart={!!personaId && !isSessionActive}
-            onStart={handleStart}
-            onEnd={handleEnd}
-          />
+          <div className="flex flex-wrap items-center gap-3">
+            <ThemeToggle theme={theme} onToggle={toggleTheme} />
+            <SessionControls
+              active={isSessionActive}
+              elapsedSec={elapsedSec}
+              canStart={!!personaId && !isSessionActive}
+              onStart={handleStart}
+              onEnd={handleEnd}
+            />
+          </div>
         </div>
       </header>
 
-      <main className="mx-auto flex w-full max-w-6xl flex-1 flex-col gap-6 px-4 py-6 md:flex-row md:px-8">
+      <main className="container-app flex flex-1 flex-col gap-6 py-6 md:flex-row">
         <section className="flex flex-1 flex-col gap-4">
           {!isSessionActive ? (
             <>
-              <h2 className="font-display text-lg font-semibold text-white">Choose an HCP persona</h2>
+              <h2 className="font-display text-lg font-semibold">Choose an HCP persona</h2>
               <PersonaSelector
                 personas={personas}
                 selectedId={personaId}
@@ -158,10 +187,10 @@ export default function App() {
             <>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <p className="text-xs uppercase tracking-wide text-slate-500">Active persona</p>
-                  <p className="font-display text-lg font-semibold text-white">
+                  <p className="kicker">Active persona</p>
+                  <p className="font-display text-lg font-semibold">
                     {selectedPersona?.name}{" "}
-                    <span className="text-sm font-normal text-slate-400">
+                    <span className="text-sm font-normal text-muted">
                       · {selectedPersona?.specialty}
                     </span>
                   </p>
@@ -169,7 +198,7 @@ export default function App() {
                 <button
                   type="button"
                   onClick={toggleSidebar}
-                  className="rounded-lg border border-white/10 bg-proxim-900 px-3 py-1.5 text-xs text-slate-300 hover:bg-proxim-800 md:hidden"
+                  className="btn px-3 py-1.5 text-xs md:hidden"
                 >
                   {sidebarOpen ? "Hide chat" : "Show chat"}
                 </button>
@@ -185,21 +214,49 @@ export default function App() {
               />
 
               {micError ? (
-                <p className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-sm text-amber-100">
+                <p className="panel border border-border px-4 py-2 text-sm" style={{ borderColor: "rgba(245, 158, 11, 0.45)" }}>
                   {micError}
                 </p>
               ) : null}
 
               {!audioUnlocked ? (
-                <p className="text-xs text-slate-500">
+                <p className="text-xs text-muted">
                   Audio unlocks when you start a session (required on mobile browsers).
                 </p>
               ) : null}
 
-              <p className="text-xs text-slate-500">
-                WebSocket: {connected ? "connected" : "disconnected"} · Silence threshold 1.5s before
-                sending to the model.
+              <p className="text-xs text-muted">
+                WebSocket: {connected ? "connected" : "disconnected"}
+                {capabilities.alignmentAvailable != null ? (
+                  <>
+                    {" "}
+                    · Lip-sync: {capabilities.alignmentAvailable ? "alignment" : "fallback"}
+                  </>
+                ) : null}
+                {capabilities.elevenLabsConfigured != null && capabilities.groqConfigured != null ? (
+                  <>
+                    {" "}
+                    · TTS:{" "}
+                    {capabilities.elevenLabsConfigured ? "ElevenLabs" : null}
+                    {capabilities.elevenLabsConfigured && capabilities.groqConfigured ? " + " : null}
+                    {capabilities.groqConfigured ? "Groq" : null}
+                    {!capabilities.elevenLabsConfigured && !capabilities.groqConfigured ? "none" : null}
+                  </>
+                ) : null}{" "}
+                · Silence threshold 1.5s before sending to the model.
               </p>
+
+              <div className="flex items-center justify-between">
+                <button
+                  type="button"
+                  onClick={() => setShowDiagnostics((v) => !v)}
+                  className="btn px-3 py-1.5 text-xs"
+                >
+                  {showDiagnostics ? "Hide lip-sync diagnostics" : "Show lip-sync diagnostics"}
+                </button>
+              </div>
+
+              {showDiagnostics ? <LipSyncDiagnostics /> : null}
             </>
           )}
         </section>
@@ -214,7 +271,7 @@ export default function App() {
         ) : null}
       </main>
 
-      <footer className="border-t border-white/10 px-4 py-4 text-center text-[11px] text-slate-600">
+      <footer className="border-t border-border px-4 py-4 text-center text-[11px] text-muted">
         Proxim · Conversation AI Hackathon 2026 · MIT License
       </footer>
     </div>

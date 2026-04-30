@@ -1,9 +1,12 @@
-import { Canvas } from "@react-three/fiber";
+import { Canvas, useFrame } from "@react-three/fiber";
 import { Environment, OrbitControls, ContactShadows } from "@react-three/drei";
-import { Component, Suspense } from "react";
+import { Component, Suspense, useRef } from "react";
 import type { ErrorInfo, ReactNode } from "react";
 import { AvatarModel } from "./AvatarModel";
 import { resolveAvatarUrl } from "../utils/resolveAvatarUrl";
+import * as THREE from "three";
+import { useAvatarTrackSubscription } from "../hooks/useAvatar";
+import type { VisemeKeyframe, VisemeKey } from "../types";
 
 interface AvatarCanvasProps {
   avatarUrl: string;
@@ -32,8 +35,42 @@ class CanvasErrorBoundary extends Component<
 
 /** Simple placeholder avatar: head + torso + shoulders rendered with Three.js primitives. */
 function PlaceholderAvatar() {
+  const { chunkStartedAt, visemes } = useAvatarTrackSubscription();
+  const mouth = (t: number) => {
+    if (!visemes.length) return 0;
+    let cur: VisemeKeyframe = visemes[0];
+    for (const f of visemes) {
+      if (f.time <= t) cur = f;
+      else break;
+    }
+    const w = cur.viseme === ("sil" as VisemeKey) ? 0 : cur.weight;
+    return THREE.MathUtils.clamp(w, 0, 1);
+  };
+
+  const g = useRef<THREE.Group>(null);
+  const m = useRef<THREE.Mesh>(null);
+
+  useFrame(() => {
+    const now = performance.now() / 1000;
+    const idle = Math.sin(now * Math.PI * 2 * 0.25) * THREE.MathUtils.degToRad(4);
+    const bob = Math.sin(now * Math.PI * 2 * 0.18) * 0.03;
+    if (g.current) {
+      g.current.rotation.y = idle;
+      g.current.position.y = -0.6 + bob;
+    }
+
+    const elapsed = chunkStartedAt != null ? Math.max(0, (performance.now() - chunkStartedAt) / 1000) : 0;
+    const open = mouth(elapsed);
+    if (m.current) {
+      // Scale "jaw" open/close.
+      const targetY = 0.012 + open * 0.12;
+      m.current.scale.y = THREE.MathUtils.lerp(m.current.scale.y, targetY, 0.25);
+      m.current.position.y = 0.98 - open * 0.01;
+    }
+  });
+
   return (
-    <group position={[0, -0.6, 0]}>
+    <group ref={g} position={[0, -0.6, 0]}>
       {/* Torso */}
       <mesh position={[0, 0.55, 0]}>
         <cylinderGeometry args={[0.18, 0.22, 0.55, 16]} />
@@ -48,6 +85,11 @@ function PlaceholderAvatar() {
       <mesh position={[0, 1.06, 0]}>
         <sphereGeometry args={[0.155, 24, 24]} />
         <meshStandardMaterial color="#d97706" roughness={0.4} />
+      </mesh>
+      {/* Mouth (animated) */}
+      <mesh ref={m} position={[0, 0.98, 0.14]} scale={[0.11, 0.012, 0.02]}>
+        <boxGeometry args={[1, 1, 1]} />
+        <meshStandardMaterial color="#0f172a" roughness={0.8} />
       </mesh>
       {/* Left shoulder */}
       <mesh position={[-0.28, 0.75, 0]}>
@@ -80,15 +122,21 @@ export function AvatarCanvas({ avatarUrl }: AvatarCanvasProps) {
     <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
       {/* Mini Three.js-free placeholder when the whole canvas crashes */}
       <div className="flex flex-col items-center gap-1 opacity-60">
-        <div className="h-16 w-12 rounded-full bg-blue-900/80" />
-        <div className="h-24 w-16 rounded-t-xl bg-blue-800/80" />
+        <div className="h-16 w-12 rounded-full" style={{ background: "rgb(var(--c-accent2) / 0.22)" }} />
+        <div className="h-24 w-16 rounded-t-xl" style={{ background: "rgb(var(--c-accent) / 0.18)" }} />
       </div>
-      <p className="text-xs text-slate-500">Avatar unavailable (GLB load failed)</p>
+      <p className="text-xs text-muted">Avatar unavailable (GLB load failed)</p>
     </div>
   );
 
   return (
-    <div className="relative h-full min-h-[280px] w-full overflow-hidden rounded-2xl bg-gradient-to-b from-proxim-800 to-proxim-950 shadow-inner ring-1 ring-white/10 md:min-h-[420px]">
+    <div
+      className="panel-strong relative h-full min-h-[280px] w-full overflow-hidden md:min-h-[420px]"
+      style={{
+        background:
+          "linear-gradient(165deg, rgb(var(--c-surface2) / 0.92), rgb(var(--c-surface) / 0.72))",
+      }}
+    >
       <CanvasErrorBoundary fallback={fallbackOverlay}>
         <Canvas camera={{ position: [0, 1.15, 2.45], fov: 28 }} dpr={[1, 2]} gl={{ alpha: true }}>
           <ambientLight intensity={0.55} />
@@ -108,7 +156,12 @@ export function AvatarCanvas({ avatarUrl }: AvatarCanvasProps) {
           />
         </Canvas>
       </CanvasErrorBoundary>
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-gradient-to-t from-proxim-950/90 to-transparent" />
+      <div
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-24"
+        style={{
+          background: "linear-gradient(180deg, transparent, rgb(var(--c-bg) / 0.55))",
+        }}
+      />
     </div>
   );
 }
