@@ -3,11 +3,12 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Emotion, Message, Persona, WsClientMessage, WsServerMessage } from "../types/index.js";
-import { streamClaudeResponse, stripEmotionTag } from "../services/claudeService.js";
+import { streamClaudeResponse, stripEmotionTag, generateScoreCard } from "../services/claudeService.js";
 import { synthesizeSentenceWithTimestamps } from "../services/elevenLabsService.js";
 import { synthesizeSentenceToWavWithGroq } from "../services/groqTtsService.js";
 import { bufferToBase64, makeSilenceWavForDuration, minimalSilenceWav } from "../services/audioService.js";
 import { synthesizeVisemesFromText } from "../services/visemeFallbackService.js";
+import { streamMuseTalkFrames } from "../services/museTalkService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -74,22 +75,14 @@ export function createWsHandler() {
     let visemes = synthesizeVisemesFromText(sentence);
     let visemeSource: "elevenlabs_alignment" | "fallback_text" | "fallback_static" = "fallback_text";
 
-    // Prefer Groq WAV TTS first for low-latency and to avoid ElevenLabs free-plan API limitations.
-    // ElevenLabs alignment is great when it works; we try it only if Groq isn't available.
-    if (groqKey) {
-      try {
-        const groqWav = await synthesizeSentenceToWavWithGroq(groqKey, groqVoice, sentence);
-        if (groqWav.length > 0) {
-          wav = groqWav;
-          visemes = synthesizeVisemesFromText(sentence);
-          visemeSource = "fallback_text";
-        }
-      } catch (err2) {
-        console.warn("[TTS] Groq TTS failed, trying ElevenLabs:", err2 instanceof Error ? err2.message : err2);
-      }
-    }
-
-    if (!wav) {
+    // ── TTS priority: ElevenLabs (audio-aligned visemes) → Groq (fallback) ──
+    //
+    // ElevenLabs with-timestamps returns character-level timing anchored to
+    // the actual audio. This gives accurate, audio-driven lip sync.
+    // Groq is fast and free but only text-based visemes (no timing data).
+    //
+    // If ELEVENLABS_API_KEY is set, always prefer it for lip-sync quality.
+    if (elevenKey) {
       try {
         const res = await synthesizeSentenceWithTimestamps(elevenKey, persona.voiceId, sentence);
         if (res.audioBase64) {
@@ -97,9 +90,25 @@ export function createWsHandler() {
           audioMimeType = res.audioMimeType;
           visemes = res.visemes;
           visemeSource = res.source;
+          console.log(`[TTS] ElevenLabs alignment: ${visemes.length} viseme frames`);
         }
       } catch (err) {
-        console.warn("[TTS] ElevenLabs failed:", err instanceof Error ? err.message : err);
+        console.warn("[TTS] ElevenLabs failed, trying Groq:", err instanceof Error ? err.message : err);
+      }
+    }
+
+    // Groq fallback: fast WAV + text-derived visemes
+    if (!audioBase64 && groqKey) {
+      try {
+        const groqWav = await synthesizeSentenceToWavWithGroq(groqKey, groqVoice, sentence);
+        if (groqWav.length > 0) {
+          wav = groqWav;
+          visemes = synthesizeVisemesFromText(sentence);
+          visemeSource = "fallback_text";
+          console.log("[TTS] Groq fallback TTS used");
+        }
+      } catch (err2) {
+        console.warn("[TTS] Groq TTS failed:", err2 instanceof Error ? err2.message : err2);
       }
     }
 
@@ -111,6 +120,29 @@ export function createWsHandler() {
       const durationSec = Math.max(0.5, lastFrame + 0.25);
       wav = makeSilenceWavForDuration(durationSec);
       console.warn(`[TTS] Both providers unavailable — sending ${durationSec.toFixed(2)}s silence for lip-sync.`);
+    }
+
+    // ── Stream video frames from MuseTalk (parallel, non-blocking) ──────────
+    // Only fires if MUSETALK_URL is set and we have a WAV buffer.
+    // Falls back silently to 3D GLB avatar if MuseTalk is unavailable.
+    if (wav && process.env.MUSETALK_URL) {
+      const wavSnapshot = Buffer.from(wav); // copy before async use
+      void (async () => {
+        let frameIndex = 0;
+        try {
+          for await (const frameBase64 of streamMuseTalkFrames(wavSnapshot, persona.id)) {
+            safeSend(ws, {
+              type: "video_frame",
+              frameBase64,
+              sentenceIndex,
+              frameIndex,
+            });
+            frameIndex++;
+          }
+        } catch (err) {
+          console.warn("[MuseTalk] Frame stream error:", err instanceof Error ? err.message : err);
+        }
+      })();
     }
 
     safeSend(ws, {
@@ -278,6 +310,7 @@ export function createWsHandler() {
           elevenLabsConfigured: !!process.env.ELEVENLABS_API_KEY,
           groqConfigured: !!process.env.GROQ_API_KEY,
         },
+        musetalk: { available: !!process.env.MUSETALK_URL },
       });
       await sendIntro(ws, persona);
       const intro = stripEmotionTag(
@@ -296,8 +329,25 @@ export function createWsHandler() {
     }
 
     if (msg.type === "session_end") {
+      const ctx = sessions.get(msg.sessionId);
+      const history = ctx ? [...ctx.messages] : [];
       sessions.delete(msg.sessionId);
       safeSend(ws, { type: "session_end", sessionId: msg.sessionId });
+
+      // Generate scorecard asynchronously — never blocks session cleanup.
+      // Fires even if no API key is set; generateScoreCard returns null gracefully.
+      if (history.length > 0) {
+        generateScoreCard(history)
+          .then((scoreCard) => {
+            if (scoreCard) {
+              safeSend(ws, { type: "session_scorecard", sessionId: msg.sessionId, scoreCard });
+            }
+          })
+          .catch((err) => {
+            console.warn("[ScoreCard] Async error (non-fatal):", err instanceof Error ? err.message : err);
+          });
+      }
+
       return;
     }
 

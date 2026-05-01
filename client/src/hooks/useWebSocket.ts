@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Emotion, VisemeKeyframe, VisemeSource, WsClientMessage, WsServerMessage } from "../types";
+import type { Emotion, ScoreCard, VisemeKeyframe, VisemeSource, WsClientMessage, WsServerMessage } from "../types";
+
 import { useSessionStore } from "../store/sessionStore";
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:3001";
@@ -24,6 +25,7 @@ export function useWebSocket() {
   const onAudioChunkRef = useRef<(p: AudioChunkPayload) => void>(() => {});
   const onTranscriptRef = useRef<(text: string, emotion: Emotion) => void>(() => {});
   const onErrorRef = useRef<(msg: string) => void>(() => {});
+  const onScoreCardRef = useRef<(card: ScoreCard) => void>(() => {});
 
   const setCurrentEmotion = useSessionStore((s) => s.setCurrentEmotion);
   const clearAssistantStream = useSessionStore((s) => s.clearAssistantStream);
@@ -110,6 +112,11 @@ export function useWebSocket() {
         }
         if (data.type === "session_end") {
           clearAssistantStream();
+          return;
+        }
+        if (data.type === "session_scorecard") {
+          onScoreCardRef.current(data.scoreCard);
+          return;
         }
       } catch {
         onErrorRef.current("Invalid message from server");
@@ -155,6 +162,10 @@ export function useWebSocket() {
     onErrorRef.current = fn;
   }, []);
 
+  const setOnScoreCard = useCallback((fn: (card: ScoreCard) => void) => {
+    onScoreCardRef.current = fn;
+  }, []);
+
   useEffect(() => {
     return () => disconnect();
   }, [disconnect]);
@@ -167,5 +178,6 @@ export function useWebSocket() {
     setOnAudioChunk,
     setOnTranscriptUpdate,
     setOnError,
+    setOnScoreCard,
   };
 }

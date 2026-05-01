@@ -6,6 +6,7 @@ import { Transcript } from "./components/Transcript";
 import { VoiceInput } from "./components/VoiceInput";
 import { LipSyncDiagnostics } from "./components/LipSyncDiagnostics";
 import { ThemeToggle } from "./components/ThemeToggle";
+import { ScoreCard } from "./components/ScoreCard";
 import { useAudioPlayback } from "./hooks/useAudioPlayback";
 import { useSession } from "./hooks/useSession";
 import { useTheme } from "./hooks/useTheme";
@@ -13,6 +14,7 @@ import { useVoiceInput } from "./hooks/useVoiceInput";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useSessionStore } from "./store/sessionStore";
 import { useAvatarStore } from "./store/avatarStore";
+import type { ScoreCard as ScoreCardType } from "./types";
 
 export default function App() {
   const {
@@ -47,10 +49,12 @@ export default function App() {
     setOnAudioChunk,
     setOnTranscriptUpdate,
     setOnError,
+    setOnScoreCard,
   } = useWebSocket();
 
   const [awaitingWsStart, setAwaitingWsStart] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [scoreCard, setScoreCard] = useState<ScoreCardType | null>(null);
   const { theme, toggleTheme } = useTheme();
 
   const { enqueue, ensureCtx } = useAudioPlayback(() => {
@@ -115,7 +119,8 @@ export default function App() {
       /* streaming text handled in store via useWebSocket */
     });
     setOnError((m) => setMicError(m));
-  }, [enqueue, setOnAudioChunk, setOnError, setOnTranscriptUpdate]);
+    setOnScoreCard((card) => setScoreCard(card));
+  }, [enqueue, setOnAudioChunk, setOnError, setOnScoreCard, setOnTranscriptUpdate]);
 
   useEffect(() => {
     if (!awaitingWsStart || !connected) return;
@@ -128,6 +133,7 @@ export default function App() {
   const handleStart = async () => {
     if (!personaId) return;
     setMicError(null);
+    setScoreCard(null);
     await ensureCtx();
     setAudioUnlocked(true);
     startSession();
@@ -152,11 +158,20 @@ export default function App() {
 
   return (
     <div className="app-shell flex flex-col">
+      {/* Post-call ScoreCard modal */}
+      {scoreCard && !isSessionActive ? (
+        <ScoreCard
+          scoreCard={scoreCard}
+          personaName={selectedPersona?.name ?? "Physician"}
+          onClose={() => setScoreCard(null)}
+        />
+      ) : null}
+
       <header className="topbar px-4 py-4 md:px-8">
         <div className="container-app flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div>
             <p className="font-display text-2xl font-bold tracking-tight">Proxim</p>
-            <p className="text-sm text-muted">Real-time AI HCP roleplay for pharmaceutical sales training</p>
+            <p className="text-sm text-muted">AI-powered HCP roleplay platform for pharmaceutical sales</p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <ThemeToggle theme={theme} onToggle={toggleTheme} />
@@ -175,7 +190,7 @@ export default function App() {
         <section className="flex flex-1 flex-col gap-4">
           {!isSessionActive ? (
             <>
-              <h2 className="font-display text-lg font-semibold">Choose an HCP persona</h2>
+              <h2 className="font-display text-lg font-semibold">Choose a Simulated Physician</h2>
               <PersonaSelector
                 personas={personas}
                 selectedId={personaId}
@@ -187,12 +202,32 @@ export default function App() {
             <>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <p className="kicker">Active persona</p>
+                  <p className="kicker">Active Simulated Physician</p>
                   <p className="font-display text-lg font-semibold">
                     {selectedPersona?.name}{" "}
                     <span className="text-sm font-normal text-muted">
                       · {selectedPersona?.specialty}
                     </span>
+                    {selectedPersona?.complianceMode ? (
+                      <span
+                        style={{
+                          marginLeft: 8,
+                          display: "inline-block",
+                          fontSize: 10,
+                          fontWeight: 700,
+                          letterSpacing: "0.08em",
+                          textTransform: "uppercase",
+                          padding: "2px 6px",
+                          borderRadius: 4,
+                          background: "rgba(34,197,94,0.15)",
+                          color: "#22c55e",
+                          border: "1px solid rgba(34,197,94,0.3)",
+                          verticalAlign: "middle",
+                        }}
+                      >
+                        MLR-Safe
+                      </span>
+                    ) : null}
                   </p>
                 </div>
                 <button
@@ -200,7 +235,7 @@ export default function App() {
                   onClick={toggleSidebar}
                   className="btn px-3 py-1.5 text-xs md:hidden"
                 >
-                  {sidebarOpen ? "Hide chat" : "Show chat"}
+                  {sidebarOpen ? "Hide Call Log" : "Show Call Log"}
                 </button>
               </div>
 
@@ -221,7 +256,7 @@ export default function App() {
 
               {!audioUnlocked ? (
                 <p className="text-xs text-muted">
-                  Audio unlocks when you start a session (required on mobile browsers).
+                  Audio unlocks when you begin a practice call (required on mobile browsers).
                 </p>
               ) : null}
 
