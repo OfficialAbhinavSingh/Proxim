@@ -16,7 +16,7 @@ export function SessionControls({ active, elapsedSec, canStart, onStart, onEnd }
   return (
     <div className="flex flex-wrap items-center gap-3">
       <div className="rounded-xl border border-border bg-surface2/70 px-4 py-2 font-mono text-sm text-fg">
-        Session {active ? formatTime(elapsedSec) : "—:—"}
+        Call {active ? formatTime(elapsedSec) : "—:—"}
       </div>
       {!active ? (
         <button
@@ -25,7 +25,7 @@ export function SessionControls({ active, elapsedSec, canStart, onStart, onEnd }
           onClick={onStart}
           className="btn-primary px-6 py-2.5 text-sm"
         >
-          Start session
+          Begin Practice Call
         </button>
       ) : (
         <button
@@ -33,7 +33,7 @@ export function SessionControls({ active, elapsedSec, canStart, onStart, onEnd }
           onClick={onEnd}
           className="btn-danger px-6 py-2.5 text-sm"
         >
-          End session
+          End Call
         </button>
       )}
     </div>

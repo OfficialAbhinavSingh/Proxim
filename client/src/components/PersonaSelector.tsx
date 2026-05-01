@@ -27,27 +27,47 @@ export function PersonaSelector({ personas, selectedId, onSelect, disabled }: Pe
             ].join(" ")}
           >
             <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="font-display text-lg font-semibold text-fg">{p.name}</p>
+              <div className="flex-1 min-w-0">
+                <p className="font-display text-lg font-semibold text-fg truncate">{p.name}</p>
                 <p className="mt-1 text-sm" style={{ color: "rgb(var(--c-accent2))" }}>
                   {p.specialty}
                 </p>
               </div>
-              {active ? (
-                <span
-                  className="chip"
-                  style={{
-                    borderColor: "transparent",
-                    background: "rgb(var(--c-accent) / 0.14)",
-                    color: "rgb(var(--c-accent))",
-                  }}
-                >
-                  Selected
-                </span>
-              ) : null}
+              <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+                {active ? (
+                  <span
+                    className="chip"
+                    style={{
+                      borderColor: "transparent",
+                      background: "rgb(var(--c-accent) / 0.14)",
+                      color: "rgb(var(--c-accent))",
+                    }}
+                  >
+                    Selected
+                  </span>
+                ) : null}
+                {p.complianceMode ? (
+                  <span
+                    style={{
+                      fontSize: 9,
+                      fontWeight: 700,
+                      letterSpacing: "0.08em",
+                      textTransform: "uppercase",
+                      padding: "2px 5px",
+                      borderRadius: 3,
+                      background: "rgba(34,197,94,0.13)",
+                      color: "#22c55e",
+                      border: "1px solid rgba(34,197,94,0.28)",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    MLR-Safe
+                  </span>
+                ) : null}
+              </div>
             </div>
-            <p className="mt-2 line-clamp-2 text-xs text-muted">{p.hospital}</p>
-            <p className="mt-2 line-clamp-2 text-xs italic text-muted/80">{p.personality}</p>
+            <p className="mt-2 line-clamp-1 text-xs text-muted">{p.hospital}</p>
+            <p className="mt-1 line-clamp-2 text-xs italic text-muted/80">{p.personality}</p>
             <p className="mt-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
               Mood: {p.mood}
             </p>
@@ -57,3 +77,4 @@ export function PersonaSelector({ personas, selectedId, onSelect, disabled }: Pe
     </div>
   );
 }
+

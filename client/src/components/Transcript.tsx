@@ -16,7 +16,7 @@ export function Transcript({ open, onToggle, messages, streamingAssistant }: Tra
       ].join(" ")}
     >
       <div className="flex items-center justify-between border-b border-border px-3 py-2">
-        <span className="kicker">Transcript</span>
+        <span className="kicker">Call Log</span>
         <button
           type="button"
           onClick={onToggle}
@@ -45,7 +45,7 @@ export function Transcript({ open, onToggle, messages, streamingAssistant }: Tra
               }
             >
               <p className="kicker">
-                {m.role === "user" ? "You" : m.emotion ? `HCP · ${m.emotion}` : "HCP"}
+                {m.role === "user" ? "You" : m.emotion ? `Physician · ${m.emotion}` : "Physician"}
               </p>
               <p className="mt-1 whitespace-pre-wrap">{m.content}</p>
             </div>
@@ -54,7 +54,7 @@ export function Transcript({ open, onToggle, messages, streamingAssistant }: Tra
         {streamingAssistant ? (
           <div className="text-left">
             <div className="inline-block max-w-[95%] rounded-2xl border border-border bg-surface2/60 px-3 py-2 italic text-fg">
-              <p className="kicker">HCP · typing</p>
+              <p className="kicker">Physician · speaking</p>
               <p className="mt-1 whitespace-pre-wrap">{streamingAssistant}</p>
             </div>
           </div>
@@ -63,3 +63,4 @@ export function Transcript({ open, onToggle, messages, streamingAssistant }: Tra
     </aside>
   );
 }
+
