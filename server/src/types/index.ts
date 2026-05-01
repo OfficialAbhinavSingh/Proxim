@@ -40,6 +40,22 @@ export interface Persona {
   avatarUrl: string;
   voiceId: string;
   systemPrompt: string;
+  /** When true, the system prompt includes MLR/off-label compliance guardrails. */
+  complianceMode?: boolean;
+}
+
+export type ScoreItemStatus = "pass" | "warn" | "fail";
+
+export interface ScoreItem {
+  label: string;
+  status: ScoreItemStatus;
+}
+
+export interface ScoreCard {
+  score: number;          // 0–100
+  readiness: string;      // e.g. "Field Ready", "Almost Ready", "Needs Practice"
+  items: ScoreItem[];
+  summary: string;        // 1-sentence overall coaching note
 }
 
 export type VisemeSource =
@@ -90,7 +106,16 @@ export type WsServerMessage =
       sessionId: string;
       alignment: { available: boolean };
       tts: { elevenLabsConfigured: boolean; groqConfigured: boolean };
+      musetalk: { available: boolean };
     }
   | { type: "session_start"; sessionId: string; personaId: string }
   | { type: "session_end"; sessionId: string }
+  | { type: "session_scorecard"; sessionId: string; scoreCard: ScoreCard }
+  | {
+      type: "video_frame";
+      /** base64-encoded JPEG frame from MuseTalk */
+      frameBase64: string;
+      sentenceIndex: number;
+      frameIndex: number;
+    }
   | { type: "error"; message: string };
