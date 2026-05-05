@@ -63,7 +63,7 @@ export default function App() {
   const [scoreCard, setScoreCard] = useState<ScoreCardType | null>(null);
   const { theme, toggleTheme } = useTheme();
 
-  const { enqueue, ensureCtx, analyserNode } = useAudioPlayback(() => {
+  const { enqueue, ensureCtx, analyserNode, isPlaying: avatarSpeaking } = useAudioPlayback(() => {
     completeAssistantTurn();
   });
 
@@ -85,6 +85,7 @@ export default function App() {
   const { listening, partialTranscript, mode, startListening, stopListening, tapToSpeak } =
     useVoiceInput({
       enabled: isSessionActive && audioUnlocked,
+      avatarSpeaking,
       onUtterance: handleUserText,
       onError: (m) => setMicError(m),
     });
@@ -298,7 +299,7 @@ export default function App() {
                     {!capabilities.elevenLabsConfigured && !capabilities.groqConfigured ? "none" : null}
                   </>
                 ) : null}{" "}
-                · Voice: Web Speech ~0.5s pause, or VAD + Whisper when Web Speech is unavailable.
+                · Voice: Web Speech API (Google, free) → server Whisper fallback.
               </p>
 
               <div className="flex items-center justify-between">

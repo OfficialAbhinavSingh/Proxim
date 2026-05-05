@@ -42,6 +42,8 @@ export interface Persona {
   gender?: "female" | "male";
   avatarUrl: string;
   voiceId: string;
+  /** Groq Orpheus voice name for this persona. */
+  groqVoice?: string;
   systemPrompt: string;
   /** When true, the system prompt includes MLR/off-label compliance guardrails. */
   complianceMode?: boolean;
@@ -119,5 +121,18 @@ export type WsServerMessage =
       frameBase64: string;
       sentenceIndex: number;
       frameIndex: number;
+    }
+  | {
+      /** Dedicated emotion event — emitted before the first TTS audio chunk of each turn. */
+      type: "emotion";
+      tag: Emotion;
+    }
+  | {
+      /** Server-side pipeline latency breakdown. */
+      type: "latency";
+      stt_ms: number;
+      llm_first_token_ms: number;
+      tts_start_ms: number;
+      total_ms: number;
     }
   | { type: "error"; message: string };

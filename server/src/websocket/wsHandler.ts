@@ -6,7 +6,7 @@ import type { Emotion, Message, Persona, WsClientMessage, WsServerMessage } from
 import { streamClaudeResponse, stripEmotionTag, generateScoreCard } from "../services/claudeService.js";
 import { synthesizeSentenceWithTimestamps } from "../services/elevenLabsService.js";
 import { synthesizeSentenceToWavWithGroq } from "../services/groqTtsService.js";
-import { bufferToBase64, makeSilenceWavForDuration, minimalSilenceWav } from "../services/audioService.js";
+import { bufferToBase64, makeSilenceWavForDuration, minimalSilenceWav, parseWavDurationSec, scaleVisemesToDuration } from "../services/audioService.js";
 import { synthesizeVisemesFromText } from "../services/visemeFallbackService.js";
 import { streamMuseTalkFrames } from "../services/museTalkService.js";
 
@@ -25,30 +25,58 @@ interface SessionCtx {
   messages: Message[];
 }
 
+/** Per-turn latency tracking. */
+interface LatencyCtx {
+  t0: number;
+  llmFirstTokenMs: number | null;
+  ttsStartMs: number | null;
+}
+
 function safeSend(ws: WebSocket, msg: WsServerMessage) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
 }
 
+/**
+ * Split the leading complete sentence from the buffer.
+ * Fires on: `.!?` (sentence end) or `,` after ≥6 words (clause boundary).
+ * Keeps latency low by not waiting for the full paragraph.
+ */
 function splitLeadingSentence(buffer: string): { sentence: string | null; rest: string } {
   const trimmed = buffer.trimStart();
-  const punct = /([.!?])(\s|$)/;
-  const m = punct.exec(trimmed);
-  if (m && m.index !== undefined) {
-    const end = m.index + 1;
+
+  // Hard sentence boundary: . ! ?
+  const sentencePunct = /([.!?])(\s|$)/;
+  const sm = sentencePunct.exec(trimmed);
+  if (sm && sm.index !== undefined) {
+    const end = sm.index + 1;
     const sentence = trimmed.slice(0, end).trim();
     const rest = trimmed.slice(end).trimStart();
-    if (sentence.length >= 2) return { sentence, rest };
+    if (sentence.length >= 4) return { sentence, rest };
   }
-  // Lower threshold to reduce perceived latency: emit shorter TTS chunks sooner.
-  if (trimmed.length >= 120) {
-    const slice = trimmed.slice(0, 120);
+
+  // Clause boundary: comma after ≥6 words — fire TTS while LLM continues.
+  const commaIdx = trimmed.indexOf(",");
+  if (commaIdx > 0) {
+    const before = trimmed.slice(0, commaIdx).trim();
+    const wordCount = before.split(/\s+/).filter(Boolean).length;
+    if (wordCount >= 6) {
+      const sentence = before + ",";
+      const rest = trimmed.slice(commaIdx + 1).trimStart();
+      return { sentence, rest };
+    }
+  }
+
+  // Absolute length cap: avoid waiting forever when LLM omits punctuation.
+  if (trimmed.length >= 100) {
+    const slice = trimmed.slice(0, 100);
     const li = slice.lastIndexOf(" ");
-    if (li > 40) {
+    if (li > 30) {
       const sentence = trimmed.slice(0, li).trim();
       const rest = trimmed.slice(li).trimStart();
       return { sentence, rest };
     }
   }
+
   return { sentence: null, rest: buffer };
 }
 
@@ -63,25 +91,28 @@ export function createWsHandler() {
     persona: Persona,
     sentence: string,
     sentenceIndex: number,
-    isLast: boolean
+    isLast: boolean,
+    latency: LatencyCtx
   ) {
     const elevenKey = process.env.ELEVENLABS_API_KEY;
     const groqKey = process.env.GROQ_API_KEY;
-    const groqVoice = process.env.GROQ_TTS_VOICE || "austin";
-    let wav: Buffer | null = null; // WAV fallback path (Groq/silence)
-    let audioBase64: string | null = null; // ElevenLabs path (mp3 base64)
+    // Use per-persona Groq voice, falling back to env var or "tara".
+    const groqVoice = persona.groqVoice ?? process.env.GROQ_TTS_VOICE ?? "tara";
+
+    let wav: Buffer | null = null;
+    let audioBase64: string | null = null;
     let audioMimeType: string = "audio/wav";
     let isSilence = false;
     let visemes = synthesizeVisemesFromText(sentence);
     let visemeSource: "elevenlabs_alignment" | "fallback_text" | "fallback_static" = "fallback_text";
 
-    // ── TTS priority: ElevenLabs (audio-aligned visemes) → Groq (fallback) ──
-    //
-    // ElevenLabs with-timestamps returns character-level timing anchored to
-    // the actual audio. This gives accurate, audio-driven lip sync.
-    // Groq is fast and free but only text-based visemes (no timing data).
-    //
-    // If ELEVENLABS_API_KEY is set, always prefer it for lip-sync quality.
+    // Record tts_start on first sentence synthesis.
+    if (latency.ttsStartMs === null) {
+      latency.ttsStartMs = Date.now() - latency.t0;
+      console.log(`[Latency] TTS start: ${latency.ttsStartMs}ms`);
+    }
+
+    // ── TTS priority: ElevenLabs (audio-aligned visemes) → Groq Orpheus (fallback) ──
     if (elevenKey) {
       try {
         const res = await synthesizeSentenceWithTimestamps(elevenKey, persona.voiceId, sentence);
@@ -97,24 +128,30 @@ export function createWsHandler() {
       }
     }
 
-    // Groq fallback: fast WAV + text-derived visemes
+    // Groq Orpheus fallback — per-persona voice assignment.
     if (!audioBase64 && groqKey) {
       try {
         const groqWav = await synthesizeSentenceToWavWithGroq(groqKey, groqVoice, sentence);
         if (groqWav.length > 0) {
           wav = groqWav;
-          visemes = synthesizeVisemesFromText(sentence);
+          const rawVisemes = synthesizeVisemesFromText(sentence);
+          // Scale text-derived visemes to match actual Groq audio duration for better lip sync.
+          const audioDurationSec = parseWavDurationSec(groqWav);
+          visemes = audioDurationSec
+            ? scaleVisemesToDuration(rawVisemes, audioDurationSec)
+            : rawVisemes;
           visemeSource = "fallback_text";
-          console.log("[TTS] Groq fallback TTS used");
+          console.log(
+            `[TTS] Groq Orpheus (voice=${groqVoice}): ${groqWav.length}B WAV, duration=${audioDurationSec?.toFixed(2) ?? "?"}s, visemes=${visemes.length}`
+          );
         }
       } catch (err2) {
-        console.warn("[TTS] Groq TTS failed:", err2 instanceof Error ? err2.message : err2);
+        console.warn("[TTS] Groq TTS failed:", err2 instanceof Error ? err2.message : String(err2));
       }
     }
 
+    // Hard fallback: timed silence so avatar can animate its mouth.
     if (!audioBase64 && !wav) {
-      // Both TTS providers failed — send silence whose duration matches the viseme
-      // track so the avatar has time to animate its mouth before the chunk ends.
       isSilence = true;
       const lastFrame = visemes.reduce((max, f) => Math.max(max, f.time), 0);
       const durationSec = Math.max(0.5, lastFrame + 0.25);
@@ -122,21 +159,14 @@ export function createWsHandler() {
       console.warn(`[TTS] Both providers unavailable — sending ${durationSec.toFixed(2)}s silence for lip-sync.`);
     }
 
-    // ── Stream video frames from MuseTalk (parallel, non-blocking) ──────────
-    // Only fires if MUSETALK_URL is set and we have a WAV buffer.
-    // Falls back silently to 3D GLB avatar if MuseTalk is unavailable.
+    // Optional MuseTalk video frames (non-blocking, fires if MUSETALK_URL is set).
     if (wav && process.env.MUSETALK_URL) {
-      const wavSnapshot = Buffer.from(wav); // copy before async use
+      const wavSnapshot = Buffer.from(wav);
       void (async () => {
         let frameIndex = 0;
         try {
           for await (const frameBase64 of streamMuseTalkFrames(wavSnapshot, persona.id)) {
-            safeSend(ws, {
-              type: "video_frame",
-              frameBase64,
-              sentenceIndex,
-              frameIndex,
-            });
+            safeSend(ws, { type: "video_frame", frameBase64, sentenceIndex, frameIndex });
             frameIndex++;
           }
         } catch (err) {
@@ -163,13 +193,14 @@ export function createWsHandler() {
     ws: WebSocket,
     persona: Persona,
     buffer: { value: string },
-    sentenceCounter: { value: number }
+    sentenceCounter: { value: number },
+    latency: LatencyCtx
   ) {
     for (;;) {
       const { sentence, rest } = splitLeadingSentence(buffer.value);
       if (!sentence) break;
       buffer.value = rest;
-      await processSentencePipeline(ws, persona, sentence, sentenceCounter.value, false);
+      await processSentencePipeline(ws, persona, sentence, sentenceCounter.value, false, latency);
       sentenceCounter.value += 1;
     }
   }
@@ -179,18 +210,19 @@ export function createWsHandler() {
     ws: WebSocket,
     persona: Persona,
     buffer: { value: string },
-    sentenceCounter: { value: number }
+    sentenceCounter: { value: number },
+    latency: LatencyCtx
   ) {
-    await emitCompleteSentences(ws, persona, buffer, sentenceCounter);
+    await emitCompleteSentences(ws, persona, buffer, sentenceCounter, latency);
     const tail = buffer.value.trim();
     if (tail.length) {
-      await processSentencePipeline(ws, persona, tail, sentenceCounter.value, true);
+      await processSentencePipeline(ws, persona, tail, sentenceCounter.value, true, latency);
       sentenceCounter.value += 1;
       buffer.value = "";
       return;
     }
     if (sentenceCounter.value === 0) {
-      await processSentencePipeline(ws, persona, "Thanks for your time.", 0, true);
+      await processSentencePipeline(ws, persona, "Thanks for your time.", 0, true, latency);
     } else {
       safeSend(ws, {
         type: "audio_chunk",
@@ -206,13 +238,15 @@ export function createWsHandler() {
   async function streamAssistantTurn(
     ws: WebSocket,
     persona: Persona,
-    history: Message[]
+    history: Message[],
+    latency: LatencyCtx
   ): Promise<{ displayText: string; emotion: Emotion } | null> {
     let raw = "";
     let lastDisplayLen = 0;
     let lastEmit = 0;
     const ttsBuf = { value: "" };
     const sentenceCounter = { value: 0 };
+    let emotionEmitted = false;
 
     try {
       for await (const { textDelta } of streamClaudeResponse(
@@ -222,6 +256,21 @@ export function createWsHandler() {
       )) {
         raw += textDelta;
         const { emotion, displayText } = stripEmotionTag(raw);
+
+        // Record LLM first token when we have actual display text.
+        if (latency.llmFirstTokenMs === null && displayText.trim().length > 0) {
+          latency.llmFirstTokenMs = Date.now() - latency.t0;
+          console.log(`[Latency] LLM first token: ${latency.llmFirstTokenMs}ms`);
+        }
+
+        // Emit dedicated emotion event BEFORE the first TTS audio chunk.
+        // This lets the client pre-load the blendshape 200ms before audio starts.
+        if (!emotionEmitted && displayText.trim().length > 0) {
+          safeSend(ws, { type: "emotion", tag: emotion });
+          emotionEmitted = true;
+          console.log(`[Emotion] Emitted early: ${emotion}`);
+        }
+
         const chunk = displayText.slice(lastDisplayLen);
         lastDisplayLen = displayText.length;
         ttsBuf.value += chunk;
@@ -237,10 +286,16 @@ export function createWsHandler() {
           });
         }
 
-        await emitCompleteSentences(ws, persona, ttsBuf, sentenceCounter);
+        await emitCompleteSentences(ws, persona, ttsBuf, sentenceCounter, latency);
       }
 
       const { emotion, displayText } = stripEmotionTag(raw);
+
+      // Ensure emotion is emitted even if response was very short.
+      if (!emotionEmitted) {
+        safeSend(ws, { type: "emotion", tag: emotion });
+      }
+
       safeSend(ws, {
         type: "transcript_update",
         role: "assistant",
@@ -248,28 +303,42 @@ export function createWsHandler() {
         emotion,
       });
 
-      await emitFinalTail(ws, persona, ttsBuf, sentenceCounter);
+      await emitFinalTail(ws, persona, ttsBuf, sentenceCounter, latency);
+
+      // Emit server-side latency telemetry for this turn.
+      const totalMs = Date.now() - latency.t0;
+      safeSend(ws, {
+        type: "latency",
+        stt_ms: 0,
+        llm_first_token_ms: latency.llmFirstTokenMs ?? 0,
+        tts_start_ms: latency.ttsStartMs ?? 0,
+        total_ms: totalMs,
+      });
+      console.log(
+        `[Latency] Turn complete — LLM: ${latency.llmFirstTokenMs ?? "?"}ms, TTS start: ${latency.ttsStartMs ?? "?"}ms, Total: ${totalMs}ms`
+      );
+
       return { displayText, emotion };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[streamAssistantTurn] error:", msg);
-      // Surface a clear error to the client
       let clientMsg = "An error occurred while generating the response.";
       if (msg.includes("credit balance is too low") || msg.includes("billing")) {
-        clientMsg = "Anthropic API: insufficient credits. Please top up at console.anthropic.com/settings/billing";
+        clientMsg = "API: insufficient credits. Please check your API keys and billing.";
       } else if (msg.includes("401") || msg.includes("authentication")) {
-        clientMsg = "Anthropic API: invalid API key. Check ANTHROPIC_API_KEY in server/.env";
+        clientMsg = "API: invalid API key. Check GROQ_API_KEY / ANTHROPIC_API_KEY in server/.env";
       } else if (msg.includes("rate")) {
-        clientMsg = "Anthropic API: rate limited. Please wait a moment and try again.";
+        clientMsg = "API: rate limited. Please wait a moment and try again.";
       }
       safeSend(ws, { type: "error", message: clientMsg });
       return null;
     }
   }
 
-  async function sendIntro(ws: WebSocket, persona: Persona) {
+  async function sendIntro(ws: WebSocket, persona: Persona, latency: LatencyCtx) {
     const greeting = `[ENGAGED]\nHello — I'm ${persona.name}. I only have a few minutes, but I'm listening. What should we focus on today?`;
     const { emotion, displayText } = stripEmotionTag(greeting);
+    safeSend(ws, { type: "emotion", tag: emotion });
     safeSend(ws, {
       type: "transcript_update",
       role: "assistant",
@@ -278,7 +347,7 @@ export function createWsHandler() {
     });
     const ttsBuf = { value: displayText };
     const sentenceCounter = { value: 0 };
-    await emitFinalTail(ws, persona, ttsBuf, sentenceCounter);
+    await emitFinalTail(ws, persona, ttsBuf, sentenceCounter, latency);
   }
 
   return async function handleMessage(ws: WebSocket, raw: string) {
@@ -307,33 +376,25 @@ export function createWsHandler() {
         },
         musetalk: { available: !!process.env.MUSETALK_URL },
       };
+
       if (existing?.messages.some((m) => m.role === "user")) {
-        safeSend(ws, {
-          type: "session_start",
-          sessionId: msg.sessionId,
-          personaId: msg.personaId,
-        });
+        safeSend(ws, { type: "session_start", sessionId: msg.sessionId, personaId: msg.personaId });
         safeSend(ws, cap);
         return;
       }
       if (existing && !existing.messages.some((m) => m.role === "user")) {
-        safeSend(ws, {
-          type: "session_start",
-          sessionId: msg.sessionId,
-          personaId: msg.personaId,
-        });
+        safeSend(ws, { type: "session_start", sessionId: msg.sessionId, personaId: msg.personaId });
         safeSend(ws, cap);
         return;
       }
 
       sessions.set(msg.sessionId, { personaId: persona.id, messages: [] });
-      safeSend(ws, {
-        type: "session_start",
-        sessionId: msg.sessionId,
-        personaId: msg.personaId,
-      });
+      safeSend(ws, { type: "session_start", sessionId: msg.sessionId, personaId: msg.personaId });
       safeSend(ws, cap);
-      await sendIntro(ws, persona);
+
+      const introLatency: LatencyCtx = { t0: Date.now(), llmFirstTokenMs: null, ttsStartMs: null };
+      await sendIntro(ws, persona, introLatency);
+
       const intro = stripEmotionTag(
         `[ENGAGED]\nHello — I'm ${persona.name}. I only have a few minutes, but I'm listening. What should we focus on today?`
       );
@@ -355,8 +416,6 @@ export function createWsHandler() {
       sessions.delete(msg.sessionId);
       safeSend(ws, { type: "session_end", sessionId: msg.sessionId });
 
-      // Generate scorecard asynchronously — never blocks session cleanup.
-      // Fires even if no API key is set; generateScoreCard returns null gracefully.
       if (history.length > 0) {
         generateScoreCard(history)
           .then((scoreCard) => {
@@ -368,7 +427,6 @@ export function createWsHandler() {
             console.warn("[ScoreCard] Async error (non-fatal):", err instanceof Error ? err.message : err);
           });
       }
-
       return;
     }
 
@@ -379,9 +437,13 @@ export function createWsHandler() {
         safeSend(ws, { type: "error", message: "Unknown session or persona" });
         return;
       }
+
+      const latency: LatencyCtx = { t0: Date.now(), llmFirstTokenMs: null, ttsStartMs: null };
+      console.log(`[Latency] Turn started for session ${msg.sessionId.slice(0, 8)}`);
+
       ctx.messages.push({ role: "user", content: msg.text, timestamp: Date.now() });
       const history = [...ctx.messages];
-      const result = await streamAssistantTurn(ws, persona, history);
+      const result = await streamAssistantTurn(ws, persona, history, latency);
       if (result) {
         ctx.messages.push({
           role: "assistant",
@@ -390,7 +452,6 @@ export function createWsHandler() {
           timestamp: Date.now(),
         });
       } else {
-        // Remove the user message so history stays consistent after a failed turn
         ctx.messages.pop();
       }
     }

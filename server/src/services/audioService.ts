@@ -43,3 +43,43 @@ export function makeSilenceWavForDuration(durationSec: number): Buffer {
 export function bufferToBase64(buf: Buffer): string {
   return buf.toString("base64");
 }
+
+/**
+ * Parse the duration (in seconds) of a PCM WAV file from its header.
+ * Returns null if the buffer is too short or not a valid WAV.
+ */
+export function parseWavDurationSec(buf: Buffer): number | null {
+  if (buf.length < 44) return null;
+  const riff = buf.toString("ascii", 0, 4);
+  const wave = buf.toString("ascii", 8, 12);
+  if (riff !== "RIFF" || wave !== "WAVE") return null;
+  try {
+    const sampleRate = buf.readUInt32LE(24);
+    const channels = buf.readUInt16LE(22);
+    const bitsPerSample = buf.readUInt16LE(34);
+    const dataSize = buf.readUInt32LE(40);
+    const bytesPerSample = bitsPerSample / 8;
+    if (!sampleRate || !channels || !bytesPerSample) return null;
+    const durationSec = dataSize / (sampleRate * channels * bytesPerSample);
+    return Number.isFinite(durationSec) && durationSec > 0 ? durationSec : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Scale text-derived viseme timestamps to match actual audio duration.
+ * When Groq TTS produces a WAV with a known duration, this aligns the
+ * mouth animation to the real speech rate instead of a fixed 11 phonemes/sec estimate.
+ */
+export function scaleVisemesToDuration(
+  visemes: import("../types/index.js").VisemeKeyframe[],
+  targetDurationSec: number
+): import("../types/index.js").VisemeKeyframe[] {
+  if (!visemes.length || targetDurationSec <= 0) return visemes;
+  const lastTime = visemes[visemes.length - 1]?.time ?? 0;
+  if (lastTime <= 0) return visemes;
+  const scale = targetDurationSec / lastTime;
+  if (Math.abs(scale - 1) < 0.05) return visemes; // within 5% — no adjustment needed
+  return visemes.map((f) => ({ ...f, time: f.time * scale }));
+}

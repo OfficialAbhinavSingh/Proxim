@@ -30,6 +30,8 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
   const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null);
   const queueRef = useRef<QueueItem[]>([]);
   const playingRef = useRef(false);
+  /** Reactive version of playingRef — consumed by useVoiceInput to mute the mic while avatar talks. */
+  const [isPlaying, setIsPlaying] = useState(false);
   // Cancel any pending Web Speech utterance when a new chunk starts.
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
 
@@ -94,6 +96,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
     const next = queueRef.current.shift();
     if (!next) return;
     playingRef.current = true;
+    setIsPlaying(true);
 
     try {
       if (next.isSilence && next.text?.trim()) {
@@ -163,6 +166,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
     playingRef.current = false;
 
     if (next.isLast) {
+      setIsPlaying(false);
       useAvatarStore.getState().clearVisemeTrack();
       onLastChunkEnded?.();
     }
@@ -179,5 +183,5 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
     [pump]
   );
 
-  return { enqueue, ensureCtx, analyserNode };
+  return { enqueue, ensureCtx, analyserNode, isPlaying };
 }

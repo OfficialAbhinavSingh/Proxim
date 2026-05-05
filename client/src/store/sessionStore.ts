@@ -30,6 +30,14 @@ export interface SessionState {
     audioMs: number | null;
   };
 
+  /** Server-reported pipeline latency from the most recent turn. */
+  serverLatency: {
+    stt_ms: number | null;
+    llm_first_token_ms: number | null;
+    tts_start_ms: number | null;
+    total_ms: number | null;
+  };
+
   setPersonaId: (id: string | null) => void;
   setSessionId: (id: string | null) => void;
   setSessionActive: (active: boolean) => void;
@@ -52,6 +60,7 @@ export interface SessionState {
   markLlmLatencyIfNeeded: (assistantText: string) => void;
   markAudioLatencyIfNeeded: () => void;
   clearLatencyTurn: () => void;
+  setServerLatency: (data: SessionState["serverLatency"]) => void;
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -73,6 +82,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     groqConfigured: null,
   },
   latency: { active: false, t0: 0, llmMs: null, audioMs: null },
+  serverLatency: { stt_ms: null, llm_first_token_ms: null, tts_start_ms: null, total_ms: null },
 
   setPersonaId: (personaId) => set({ personaId }),
   setSessionId: (sessionId) => set({ sessionId }),
@@ -127,6 +137,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     set({
       latency: { active: false, t0: 0, llmMs: null, audioMs: null },
     }),
+  setServerLatency: (serverLatency) => set({ serverLatency }),
 
   resetSession: () =>
     set({
@@ -145,6 +156,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         groqConfigured: null,
       },
       latency: { active: false, t0: 0, llmMs: null, audioMs: null },
+      serverLatency: { stt_ms: null, llm_first_token_ms: null, tts_start_ms: null, total_ms: null },
     }),
 }));
 

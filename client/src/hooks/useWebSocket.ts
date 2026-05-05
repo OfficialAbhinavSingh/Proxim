@@ -36,6 +36,7 @@ export function useWebSocket() {
   const markLlmLatencyIfNeeded = useSessionStore((s) => s.markLlmLatencyIfNeeded);
   const setCapabilities = useSessionStore((s) => s.setCapabilities);
   const setWsProtocolVersion = useSessionStore((s) => s.setWsProtocolVersion);
+  const setServerLatency = useSessionStore((s) => s.setServerLatency);
 
   const candidateUrls = useCallback((): string[] => {
     const base = WS_URL;
@@ -140,6 +141,23 @@ export function useWebSocket() {
           onScoreCardRef.current(data.scoreCard);
           return;
         }
+        if (data.type === "emotion") {
+          // Dedicated emotion event — fires BEFORE first TTS audio chunk.
+          setCurrentEmotion(data.tag);
+          return;
+        }
+        if (data.type === "latency") {
+          setServerLatency({
+            stt_ms: data.stt_ms,
+            llm_first_token_ms: data.llm_first_token_ms,
+            tts_start_ms: data.tts_start_ms,
+            total_ms: data.total_ms,
+          });
+          console.log(
+            `[Latency] Server reported — LLM: ${data.llm_first_token_ms}ms, TTS: ${data.tts_start_ms}ms, Total: ${data.total_ms}ms`
+          );
+          return;
+        }
       } catch {
         onErrorRef.current("Invalid message from server");
       }
@@ -152,6 +170,7 @@ export function useWebSocket() {
     setCapabilities,
     setCurrentEmotion,
     setWsProtocolVersion,
+    setServerLatency,
   ]);
 
   const disconnect = useCallback(() => {

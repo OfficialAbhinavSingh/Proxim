@@ -1,88 +1,122 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const SILENCE_MS_WEBSPEECH = 520;
-/** Legacy MediaRecorder path: shorter than old 1.5s, still slower than VAD. */
-const SILENCE_MS_LEGACY_SERVER = 880;
-const MIN_UTTERANCE_MS = 600;
-const MAX_SEGMENT_MS = 45_000;
-const MONITOR_INTERVAL_MS = 80;
-const SPEECH_PEAK_THRESHOLD = 0.02;
-const MIN_BLOB_BYTES = 900;
-const VAD_MIN_SAMPLES = 3200;
+const PCM_SAMPLE_RATE = 16_000;        // Whisper's native rate
+const PCM_SPEECH_THRESHOLD = 0.0025;   // RMS — raised from 0.0008 to cut ambient/echo false-positives
+const PCM_PEAK_THRESHOLD = 0.035;      // Peak — raised from 0.015 for same reason
+const PCM_SILENCE_FRAMES = 15;         // ~610ms silence triggers auto-flush (was 12)
+const PCM_MIN_SPEECH_FRAMES = 5;       // require more sustained speech before flushing (was 2)
+const PCM_ROLLING_MAX_FRAMES = 250;    // rolling buffer cap ~32s
+const PCM_MAX_FRAMES = 230;            // ~30s hard limit per segment
+const PCM_BUFFER_SIZE = 2048;
+const PCM_MANUAL_TAIL_FRAMES = 48;     // ~6s tail fallback for manual flush
+/** ms to keep mic muted after avatar finishes speaking — lets speaker echo die down. */
+const POST_SPEAK_COOLDOWN_MS = 450;
 
-function pickRecorderMime(): string | undefined {
-  if (typeof MediaRecorder === "undefined") return undefined;
-  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"];
-  for (const t of candidates) {
-    if (MediaRecorder.isTypeSupported(t)) return t;
-  }
-  return undefined;
-}
+const DEBUG = true;
+const log = (...args: unknown[]) => { if (DEBUG) console.log("[voice]", ...args); };
+const logErr = (...args: unknown[]) => { if (DEBUG) console.error("[voice]", ...args); };
 
-async function parseTranscribeError(res: Response): Promise<string> {
-  const raw = await res.text();
-  try {
-    const j = JSON.parse(raw) as { error?: string };
-    if (j.error && typeof j.error === "string") return j.error;
-  } catch {
-    /* ignore */
+/** Inline WAV encoder — avoids any dependency on vad-web / ONNX. */
+function encodeWav(samples: Float32Array, sampleRate: number): Blob {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const s4 = (o: number, t: string) => { for (let i = 0; i < 4; i++) v.setUint8(o + i, t.charCodeAt(i)); };
+  s4(0, "RIFF");
+  v.setUint32(4, 36 + samples.length * 2, true);
+  s4(8, "WAVE");
+  s4(12, "fmt ");
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);              // PCM
+  v.setUint16(22, 1, true);             // mono
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, sampleRate * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  s4(36, "data");
+  v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const x = Math.max(-1, Math.min(1, samples[i]!));
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7FFF, true);
   }
-  return raw || `HTTP ${res.status}`;
+  return new Blob([buf], { type: "audio/wav" });
 }
 
 export interface UseVoiceInputOptions {
   enabled: boolean;
+  /**
+   * Set to true while the avatar is playing TTS audio.
+   * The PCM pipeline will discard captured frames and clear the buffer to prevent
+   * the avatar's voice from being fed back into Whisper (echo loop fix).
+   * A POST_SPEAK_COOLDOWN_MS delay is applied after avatarSpeaking goes false
+   * so any residual speaker echo dies down before recording resumes.
+   */
+  avatarSpeaking?: boolean;
   onUtterance: (text: string) => void;
   onPartial?: (text: string) => void;
   onError?: (message: string) => void;
 }
 
-type InputMode = "webspeech" | "vad_whisper" | "server_stt" | "unsupported";
+type InputMode = "webspeech" | "server_stt" | "unsupported";
 
-interface MicVadLike {
-  start: () => void;
-  pause: () => void;
-  destroy: () => void;
-}
-
-/**
- * Primary path: Web Speech API with short silence end-of-utterance.
- * Fallback: @ricky0123/vad-web MicVAD → WAV → POST /session/transcribe (Whisper).
- * Last resort: MediaRecorder + RMS silence splits (legacy).
- *
- * Set `VITE_FORCE_SERVER_STT=true` to skip Web Speech and use VAD/Whisper first.
- */
-export function useVoiceInput({
-  enabled,
-  onUtterance,
-  onPartial,
-  onError,
-}: UseVoiceInputOptions) {
+export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, onPartial, onError }: UseVoiceInputOptions) {
   const [listening, setListening] = useState(false);
   const [partialTranscript, setPartialTranscript] = useState("");
   const [mode, setMode] = useState<InputMode>("webspeech");
 
+  // Web Speech refs
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTextRef = useRef("");
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
 
+  // PCM-WAV Whisper pipeline refs
   const pipelineActiveRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const timeDomainRef = useRef<Uint8Array | null>(null);
-  const monitorIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const segmentStartRef = useRef(0);
-  const lastVoiceRef = useRef(0);
-  const hadSpeechInSegmentRef = useRef(false);
-  const vadRef = useRef<MicVadLike | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+
+  // PCM segment state (lives inside the onaudioprocess closure; these refs allow flush from tapToSpeak)
+  const pcmSamplesRef = useRef<Float32Array[]>([]);
+  const pcmSpeakingRef = useRef(false);
+  const pcmSilenceFramesRef = useRef(0);
+  const pcmSpeechFramesRef = useRef(0);
+  const pcmTotalFramesRef = useRef(0);
+  const pcmFlushingRef = useRef(false);
 
   const enabledRef = useRef(enabled);
+  useEffect(() => { enabledRef.current = enabled; }, [enabled]);
+
+  /**
+   * Mic mute gate: true while the avatar is speaking OR during the post-speech
+   * cooldown. When muted, the onaudioprocess handler discards incoming frames
+   * and clears the rolling buffer so no avatar audio leaks into Whisper.
+   */
+  const mutedRef = useRef(false);
+  const cooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
-    enabledRef.current = enabled;
-  }, [enabled]);
+    if (avatarSpeaking) {
+      // Avatar started speaking — mute immediately and cancel any pending cooldown.
+      if (cooldownTimerRef.current) { clearTimeout(cooldownTimerRef.current); cooldownTimerRef.current = null; }
+      mutedRef.current = true;
+      // Wipe any audio accumulated before / during avatar speech to avoid contamination.
+      pcmSamplesRef.current = [];
+      pcmSpeakingRef.current = false;
+      pcmSilenceFramesRef.current = 0;
+      pcmSpeechFramesRef.current = 0;
+      setPartialTranscript("");
+    } else {
+      // Avatar stopped speaking — stay muted for POST_SPEAK_COOLDOWN_MS so echo dies down.
+      cooldownTimerRef.current = setTimeout(() => {
+        mutedRef.current = false;
+        cooldownTimerRef.current = null;
+        log("mic unmuted after post-speak cooldown");
+      }, POST_SPEAK_COOLDOWN_MS);
+    }
+    return () => {
+      if (cooldownTimerRef.current) { clearTimeout(cooldownTimerRef.current); cooldownTimerRef.current = null; }
+    };
+  }, [avatarSpeaking]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onUtteranceRef = useRef(onUtterance);
   const onErrorRef = useRef(onError);
@@ -93,6 +127,203 @@ export function useVoiceInput({
     onPartialRef.current = onPartial;
   }, [onUtterance, onError, onPartial]);
 
+  const reportError = useCallback((msg: string) => {
+    logErr(msg);
+    onErrorRef.current?.(msg);
+  }, []);
+
+  // ── WAV Whisper pipeline ──────────────────────────────────────────────────
+
+  const transcribeBlob = useCallback(async (blob: Blob, label = "") => {
+    const api = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
+    log(`POST /session/transcribe (${blob.size}B${label ? " " + label : ""})`);
+    try {
+      const fd = new FormData();
+      fd.append("audio", blob, "clip.wav");
+      const res = await fetch(`${api}/session/transcribe`, { method: "POST", body: fd });
+      if (!res.ok) {
+        const raw = await res.text();
+        throw new Error(raw || `HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as { text?: string; error?: string };
+      if (data.error && !data.text) throw new Error(data.error);
+      const text = (data.text ?? "").trim();
+      if (text) {
+        log("whisper →", text);
+        onUtteranceRef.current(text);
+      } else {
+        log("whisper returned empty (noise/hallucination filtered)");
+      }
+    } catch (e) {
+      reportError(`Transcription error: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [reportError]);
+
+  /** manualFlush=true skips the min-speech-frames guard (user explicitly pressed Send). */
+  const flushPcmBuffer = useCallback(async (manualFlush = false) => {
+    if (pcmFlushingRef.current) return;
+    if (pcmSamplesRef.current.length === 0) {
+      log("PCM flush: buffer empty, nothing to send");
+      return;
+    }
+    const speechFrames = pcmSpeechFramesRef.current;
+    if (!manualFlush && speechFrames < PCM_MIN_SPEECH_FRAMES) {
+      log(`PCM auto-flush skipped — ${speechFrames} speech frames < ${PCM_MIN_SPEECH_FRAMES} min`);
+      pcmSamplesRef.current = [];
+      pcmSpeakingRef.current = false;
+      pcmSilenceFramesRef.current = 0;
+      pcmSpeechFramesRef.current = 0;
+      pcmTotalFramesRef.current = 0;
+      setPartialTranscript("");
+      return;
+    }
+    pcmFlushingRef.current = true;
+
+    let chunks = pcmSamplesRef.current;
+    if (manualFlush && speechFrames < PCM_MIN_SPEECH_FRAMES && chunks.length > PCM_MANUAL_TAIL_FRAMES) {
+      // Manual "Send now" often includes a long rolling window. If VAD missed speech,
+      // only send the recent tail so Whisper doesn't get dominated by silence.
+      chunks = chunks.slice(-PCM_MANUAL_TAIL_FRAMES);
+      log(`PCM manual tail fallback: using last ${chunks.length} frames`);
+    }
+    pcmSamplesRef.current = [];
+    pcmSpeakingRef.current = false;
+    pcmSilenceFramesRef.current = 0;
+    pcmSpeechFramesRef.current = 0;
+    pcmTotalFramesRef.current = 0;
+
+    const total = chunks.reduce((a, b) => a + b.length, 0);
+    log(`PCM flush (manual=${manualFlush}): ${chunks.length} frames, ${(total / PCM_SAMPLE_RATE).toFixed(2)}s audio`);
+    const merged = new Float32Array(total);
+    let off = 0;
+    for (const c of chunks) { merged.set(c, off); off += c.length; }
+
+    setPartialTranscript("…");
+    const blob = encodeWav(merged, PCM_SAMPLE_RATE);
+    await transcribeBlob(blob);
+    setPartialTranscript("");
+    pcmFlushingRef.current = false;
+  }, [transcribeBlob]);
+
+  const stopPcmPipeline = useCallback(() => {
+    log("stopPcmPipeline");
+    pipelineActiveRef.current = false;
+    try { processorRef.current?.disconnect(); } catch { /* ignore */ }
+    processorRef.current = null;
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    const ctx = audioCtxRef.current;
+    audioCtxRef.current = null;
+    if (ctx && ctx.state !== "closed") void ctx.close().catch(() => {});
+    pcmSamplesRef.current = [];
+    pcmSpeakingRef.current = false;
+    pcmSilenceFramesRef.current = 0;
+    pcmSpeechFramesRef.current = 0;
+    pcmTotalFramesRef.current = 0;
+    pcmFlushingRef.current = false;
+    setListening(false);
+    setPartialTranscript("");
+  }, []);
+
+  const startPcmWhisperPipeline = useCallback(async () => {
+    if (pipelineActiveRef.current) { log("PCM pipeline already active"); return; }
+    log("starting PCM WAV → Whisper pipeline");
+    pipelineActiveRef.current = true;
+    setMode("server_stt");
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      streamRef.current = stream;
+      log("mic stream acquired");
+
+      const audioCtx = new AudioContext({ sampleRate: PCM_SAMPLE_RATE });
+      audioCtxRef.current = audioCtx;
+      if (audioCtx.state === "suspended") {
+        await audioCtx.resume().catch(() => {});
+      }
+      log(`AudioContext state=${audioCtx.state} sampleRate=${audioCtx.sampleRate}`);
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      // ScriptProcessor is deprecated but still fully supported in all browsers
+      // and doesn't need a separate worklet URL file.
+      const processor = audioCtx.createScriptProcessor(PCM_BUFFER_SIZE, 1, 1);
+      processorRef.current = processor;
+
+      processor.onaudioprocess = (ev) => {
+        if (!pipelineActiveRef.current || !enabledRef.current || pcmFlushingRef.current) return;
+
+        // Drop all frames while avatar is speaking (or during echo-tail cooldown).
+        if (mutedRef.current) {
+          pcmSamplesRef.current = [];
+          pcmSpeakingRef.current = false;
+          pcmSilenceFramesRef.current = 0;
+          pcmSpeechFramesRef.current = 0;
+          return;
+        }
+
+        const input = ev.inputBuffer.getChannelData(0);
+        pcmTotalFramesRef.current += 1;
+
+        // RMS + peak energy (peak catches quiet but sharp consonants)
+        let sum = 0;
+        let peak = 0;
+        for (let i = 0; i < input.length; i++) {
+          const v = input[i]!;
+          sum += v * v;
+          const a = Math.abs(v);
+          if (a > peak) peak = a;
+        }
+        const rms = Math.sqrt(sum / input.length);
+
+        // Always accumulate into rolling buffer (so Send now always has audio)
+        pcmSamplesRef.current.push(new Float32Array(input));
+        // Cap rolling buffer to avoid unbounded memory
+        if (pcmSamplesRef.current.length > PCM_ROLLING_MAX_FRAMES) {
+          pcmSamplesRef.current.shift();
+        }
+
+        if (rms > PCM_SPEECH_THRESHOLD || peak > PCM_PEAK_THRESHOLD) {
+          if (!pcmSpeakingRef.current) {
+            log(`speech start (rms=${rms.toFixed(4)} peak=${peak.toFixed(4)})`);
+          }
+          pcmSpeakingRef.current = true;
+          pcmSilenceFramesRef.current = 0;
+          pcmSpeechFramesRef.current += 1;
+          setPartialTranscript("(speaking…)");
+          onPartialRef.current?.("(speaking…)");
+        } else if (pcmSpeakingRef.current) {
+          pcmSilenceFramesRef.current += 1;
+          if (pcmSilenceFramesRef.current >= PCM_SILENCE_FRAMES) {
+            log(`auto-flush: silence after ${pcmSpeechFramesRef.current} speech frames`);
+            void flushPcmBuffer(false);
+          }
+        }
+
+        // Hard max limit
+        if (pcmTotalFramesRef.current >= PCM_MAX_FRAMES) {
+          log("PCM max frames reached, flushing");
+          void flushPcmBuffer(false);
+        }
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+
+      setListening(true);
+    } catch (e) {
+      pipelineActiveRef.current = false;
+      reportError(`Microphone error: ${e instanceof Error ? e.message : String(e)}`);
+      setListening(false);
+      setMode("unsupported");
+    }
+  }, [flushPcmBuffer, reportError]);
+
+  // ── Web Speech API ────────────────────────────────────────────────────────
+
   const clearSilenceTimer = useCallback(() => {
     if (silenceTimerRef.current) {
       clearTimeout(silenceTimerRef.current);
@@ -100,308 +331,33 @@ export function useVoiceInput({
     }
   }, []);
 
-  const scheduleUtteranceEnd = useCallback(
-    (text: string) => {
-      clearSilenceTimer();
-      lastTextRef.current = text;
-      silenceTimerRef.current = setTimeout(() => {
-        const t = lastTextRef.current.trim();
-        if (t.length > 0) onUtteranceRef.current(t);
-        lastTextRef.current = "";
-        setPartialTranscript("");
-        silenceTimerRef.current = null;
-      }, SILENCE_MS_WEBSPEECH);
-    },
-    [clearSilenceTimer]
-  );
+  const scheduleUtteranceEnd = useCallback((text: string) => {
+    clearSilenceTimer();
+    lastTextRef.current = text;
+    silenceTimerRef.current = setTimeout(() => {
+      const t = lastTextRef.current.trim();
+      if (t) { log("webspeech utterance →", t); onUtteranceRef.current(t); }
+      lastTextRef.current = "";
+      setPartialTranscript("");
+      silenceTimerRef.current = null;
+    }, SILENCE_MS_WEBSPEECH);
+  }, [clearSilenceTimer]);
 
   const stopWebSpeech = useCallback(() => {
     clearSilenceTimer();
-    try {
-      recognitionRef.current?.stop();
-    } catch {
-      /* ignore */
-    }
+    try { recognitionRef.current?.stop(); } catch { /* ignore */ }
     recognitionRef.current = null;
     setPartialTranscript("");
   }, [clearSilenceTimer]);
 
-  const clearSegmentMonitor = useCallback(() => {
-    if (monitorIntervalRef.current) {
-      clearInterval(monitorIntervalRef.current);
-      monitorIntervalRef.current = null;
-    }
-  }, []);
-
-  const stopMediaRecorderOnly = useCallback(() => {
-    clearSegmentMonitor();
-    try {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
-        mediaRecorderRef.current.stop();
-      }
-    } catch {
-      /* ignore */
-    }
-    mediaRecorderRef.current = null;
-    chunksRef.current = [];
-  }, [clearSegmentMonitor]);
-
-  const teardownAudioGraph = useCallback(() => {
-    const ctx = audioCtxRef.current;
-    audioCtxRef.current = null;
-    analyserRef.current = null;
-    timeDomainRef.current = null;
-    if (ctx && ctx.state !== "closed") {
-      void ctx.close().catch(() => {});
-    }
-  }, []);
-
-  const stopServerSttPipeline = useCallback(() => {
-    pipelineActiveRef.current = false;
-    clearSegmentMonitor();
-    stopMediaRecorderOnly();
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
-    }
-    teardownAudioGraph();
-    setListening(false);
-  }, [clearSegmentMonitor, stopMediaRecorderOnly, teardownAudioGraph]);
-
-  const stopVad = useCallback(() => {
-    try {
-      vadRef.current?.destroy();
-    } catch {
-      /* ignore */
-    }
-    vadRef.current = null;
-    pipelineActiveRef.current = false;
-    setListening(false);
-  }, []);
-
-  const transcribeBlob = useCallback(async (blob: Blob, filename = "clip.webm") => {
-    const api = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
-    try {
-      const fd = new FormData();
-      fd.append("audio", blob, filename);
-      const res = await fetch(`${api}/session/transcribe`, { method: "POST", body: fd });
-      if (!res.ok) throw new Error(await parseTranscribeError(res));
-      const data = (await res.json()) as { text?: string; error?: string };
-      if (data.error && !data.text) throw new Error(data.error);
-      const text = (data.text ?? "").trim();
-      if (text) onUtteranceRef.current(text);
-    } catch (e) {
-      onErrorRef.current?.(e instanceof Error ? e.message : "Transcription failed");
-    }
-  }, []);
-
-  const beginServerSegment = useCallback(() => {
-    const stream = streamRef.current;
-    if (!stream || !pipelineActiveRef.current || !enabledRef.current) return;
-
-    clearSegmentMonitor();
-    const mime = pickRecorderMime();
-    let mr: MediaRecorder;
-    try {
-      mr = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
-    } catch {
-      onErrorRef.current?.("MediaRecorder is not supported for this browser / codec.");
-      pipelineActiveRef.current = false;
-      setListening(false);
-      setMode("unsupported");
-      return;
-    }
-
-    chunksRef.current = [];
-    mr.ondataavailable = (ev) => {
-      if (ev.data.size > 0) chunksRef.current.push(ev.data);
-    };
-
-    segmentStartRef.current = performance.now();
-    lastVoiceRef.current = segmentStartRef.current;
-    hadSpeechInSegmentRef.current = false;
-
-    mr.onstop = () => {
-      clearSegmentMonitor();
-      mediaRecorderRef.current = null;
-      const t = mr.mimeType || mime || "audio/webm";
-      const blob = new Blob(chunksRef.current, { type: t });
-      chunksRef.current = [];
-
-      const run = async () => {
-        if (blob.size >= MIN_BLOB_BYTES && pipelineActiveRef.current && enabledRef.current) {
-          setPartialTranscript("…");
-          await transcribeBlob(blob);
-          setPartialTranscript("");
-        }
-        if (pipelineActiveRef.current && enabledRef.current) {
-          beginServerSegment();
-        } else {
-          setListening(false);
-        }
-      };
-      void run();
-    };
-
-    mediaRecorderRef.current = mr;
-    try {
-      mr.start();
-    } catch (e) {
-      onErrorRef.current?.(e instanceof Error ? e.message : "Could not start recording");
-      pipelineActiveRef.current = false;
-      setListening(false);
-      return;
-    }
-
-    const analyser = analyserRef.current;
-    const buf = timeDomainRef.current;
-    if (!analyser || !buf) return;
-
-    monitorIntervalRef.current = setInterval(() => {
-      if (!pipelineActiveRef.current || !enabledRef.current) return;
-      const rec = mediaRecorderRef.current;
-      if (!rec || rec.state !== "recording") return;
-
-      analyser.getByteTimeDomainData(buf as Uint8Array<ArrayBuffer>);
-      let peak = 0;
-      for (let i = 0; i < buf.length; i++) {
-        const v = Math.abs((buf[i]! - 128) / 128);
-        if (v > peak) peak = v;
-      }
-      const now = performance.now();
-      if (peak >= SPEECH_PEAK_THRESHOLD) {
-        hadSpeechInSegmentRef.current = true;
-        lastVoiceRef.current = now;
-        const interim = "(listening…)";
-        setPartialTranscript(interim);
-        onPartialRef.current?.(interim);
-      }
-
-      const silentFor = now - lastVoiceRef.current;
-      const segmentAge = now - segmentStartRef.current;
-      const shouldSplit =
-        hadSpeechInSegmentRef.current &&
-        silentFor >= SILENCE_MS_LEGACY_SERVER &&
-        segmentAge >= MIN_UTTERANCE_MS;
-      const maxOut = segmentAge >= MAX_SEGMENT_MS;
-
-      if (shouldSplit || maxOut) {
-        clearSegmentMonitor();
-        try {
-          rec.stop();
-        } catch {
-          /* ignore */
-        }
-      }
-    }, MONITOR_INTERVAL_MS);
-  }, [clearSegmentMonitor, transcribeBlob]);
-
-  const startLegacyServerSttPipeline = useCallback(async () => {
-    if (pipelineActiveRef.current) return;
-    pipelineActiveRef.current = true;
-    setMode("server_stt");
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      streamRef.current = stream;
-
-      const audioCtx = new AudioContext();
-      audioCtxRef.current = audioCtx;
-      await audioCtx.resume().catch(() => {});
-
-      const source = audioCtx.createMediaStreamSource(stream);
-      const analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 1024;
-      analyserRef.current = analyser;
-      timeDomainRef.current = new Uint8Array(new ArrayBuffer(analyser.fftSize));
-
-      const silent = audioCtx.createGain();
-      silent.gain.value = 0;
-      source.connect(analyser);
-      analyser.connect(silent);
-      silent.connect(audioCtx.destination);
-
-      setListening(true);
-      beginServerSegment();
-    } catch {
-      pipelineActiveRef.current = false;
-      onErrorRef.current?.("Could not access microphone.");
-      setListening(false);
-      setMode("unsupported");
-    }
-  }, [beginServerSegment]);
-
-  const startVadWhisperPipeline = useCallback(async () => {
-    if (vadRef.current || pipelineActiveRef.current) return;
-    setMode("vad_whisper");
-
-    try {
-      const ort = await import("onnxruntime-web");
-      const wasmVer = import.meta.env.VITE_ORT_WASM_VERSION;
-      if (wasmVer) {
-        ort.env.wasm.wasmPaths = `https://cdn.jsdelivr.net/npm/onnxruntime-web@${wasmVer}/dist/`;
-      }
-
-      const { MicVAD, utils } = await import("@ricky0123/vad-web");
-      const { VAD_WORKLET_URL, VAD_MODEL_URL } = await import("../vad/vadAssets");
-
-      const resolveModelFetchUrl = (path: string) => {
-        if (path.startsWith("http://") || path.startsWith("https://")) return path;
-        return new URL(path, window.location.href).href;
-      };
-
-      const vad = (await MicVAD.new({
-        workletURL: VAD_WORKLET_URL,
-        modelURL: VAD_MODEL_URL,
-        modelFetcher: (path: string) =>
-          fetch(resolveModelFetchUrl(path)).then((r) => r.arrayBuffer()),
-        redemptionFrames: 2,
-        minSpeechFrames: 2,
-        positiveSpeechThreshold: 0.45,
-        negativeSpeechThreshold: 0.28,
-        submitUserSpeechOnPause: true,
-        onSpeechStart: () => {
-          const interim = "(listening…)";
-          setPartialTranscript(interim);
-          onPartialRef.current?.(interim);
-        },
-        onSpeechEnd: async (audio: Float32Array) => {
-          if (!pipelineActiveRef.current || !enabledRef.current) return;
-          if (audio.length < VAD_MIN_SAMPLES) return;
-          setPartialTranscript("…");
-          try {
-            const wav = utils.encodeWAV(audio);
-            const blob = new Blob([wav], { type: "audio/wav" });
-            await transcribeBlob(blob, "clip.wav");
-          } finally {
-            if (enabledRef.current) setPartialTranscript("");
-          }
-        },
-        onVADMisfire: () => {},
-        onFrameProcessed: () => {},
-      })) as MicVadLike;
-
-      vadRef.current = vad;
-      pipelineActiveRef.current = true;
-      vad.start();
-      setListening(true);
-    } catch (e) {
-      vadRef.current = null;
-      const msg = e instanceof Error ? e.message : "VAD failed";
-      onErrorRef.current?.(`${msg} — falling back to legacy recorder.`);
-      await startLegacyServerSttPipeline();
-    }
-  }, [startLegacyServerSttPipeline, transcribeBlob]);
-
-  const startWebSpeech = useCallback(() => {
+  const startWebSpeech = useCallback((): boolean => {
     const SR =
       (window as unknown as { SpeechRecognition?: typeof SpeechRecognition }).SpeechRecognition ||
       (window as unknown as { webkitSpeechRecognition?: typeof SpeechRecognition }).webkitSpeechRecognition;
-    if (!SR) {
-      return false;
-    }
+    if (!SR) { log("Web Speech API not available"); return false; }
     if (recognitionRef.current) return true;
 
+    log("starting Web Speech API");
     setMode("webspeech");
     const rec = new SR();
     rec.continuous = true;
@@ -412,9 +368,9 @@ export function useVoiceInput({
       let interim = "";
       let finalChunk = "";
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        const res = ev.results[i];
-        if (res.isFinal) finalChunk += res[0].transcript;
-        else interim += res[0].transcript;
+        const r = ev.results[i];
+        if (r.isFinal) finalChunk += r[0].transcript;
+        else interim += r[0].transcript;
       }
       const combined = (finalChunk + interim).trim();
       if (combined) {
@@ -425,29 +381,22 @@ export function useVoiceInput({
     };
 
     rec.onerror = (ev: SpeechRecognitionErrorEvent) => {
+      logErr(`Web Speech error: ${ev.error}`);
       if (ev.error === "not-allowed" || ev.error === "service-not-allowed") {
-        onErrorRef.current?.("Microphone or speech recognition permission denied.");
+        reportError("Microphone permission denied.");
       } else if (ev.error === "network") {
-        try {
-          rec.stop();
-        } catch {
-          /* ignore */
-        }
+        // Google speech servers unreachable — fall back to PCM-WAV Whisper
         recognitionRef.current = null;
-        onErrorRef.current?.("Web Speech unavailable (network/VPN). Switching to VAD transcription…");
-        void startVadWhisperPipeline();
-      } else if (ev.error !== "no-speech" && ev.error !== "aborted") {
-        onErrorRef.current?.(`Speech recognition: ${ev.error}`);
+        try { rec.stop(); } catch { /* ignore */ }
+        reportError("Web Speech unavailable (network). Switching to Whisper…");
+        void startPcmWhisperPipeline();
       }
+      // "no-speech" and "aborted" are non-fatal; onend will restart
     };
 
     rec.onend = () => {
       if (recognitionRef.current === rec && enabledRef.current) {
-        try {
-          rec.start();
-        } catch {
-          /* may throw if already starting */
-        }
+        try { rec.start(); } catch { /* ignore */ }
       }
     };
 
@@ -457,83 +406,58 @@ export function useVoiceInput({
       setListening(true);
       return true;
     } catch (e) {
-      onErrorRef.current?.(e instanceof Error ? e.message : "Could not start speech recognition");
+      reportError(e instanceof Error ? e.message : "Could not start speech recognition");
       return false;
     }
-  }, [scheduleUtteranceEnd, startVadWhisperPipeline]);
+  }, [reportError, scheduleUtteranceEnd, startPcmWhisperPipeline]);
+
+  // ── Public API ────────────────────────────────────────────────────────────
 
   const stopListening = useCallback(() => {
+    log("stopListening");
     stopWebSpeech();
-    stopServerSttPipeline();
-    stopVad();
-  }, [stopServerSttPipeline, stopVad, stopWebSpeech]);
+    stopPcmPipeline();
+  }, [stopPcmPipeline, stopWebSpeech]);
 
   const startListening = useCallback(async () => {
     const forceServer = import.meta.env.VITE_FORCE_SERVER_STT === "true";
+    log(`startListening (forceServer=${forceServer})`);
     if (forceServer) {
-      await startVadWhisperPipeline();
+      await startPcmWhisperPipeline();
       return;
     }
     const ok = startWebSpeech();
-    if (ok) return;
-    await startVadWhisperPipeline();
-  }, [startVadWhisperPipeline, startWebSpeech]);
+    if (!ok) await startPcmWhisperPipeline();
+  }, [startPcmWhisperPipeline, startWebSpeech]);
 
   const tapToSpeak = useCallback(() => {
-    if (mode === "vad_whisper" && vadRef.current) {
-      vadRef.current.pause();
-      vadRef.current.start();
-      return;
+    if (mode === "server_stt") {
+      log("tapToSpeak: manual flush (bypasses speech-frame guard)");
+      void flushPcmBuffer(true);
     }
-    if (mode === "server_stt" && mediaRecorderRef.current?.state === "recording") {
-      clearSegmentMonitor();
-      try {
-        mediaRecorderRef.current.stop();
-      } catch {
-        /* ignore */
-      }
-      return;
-    }
-    if (mode === "webspeech") {
-      return;
-    }
-    void startVadWhisperPipeline();
-  }, [clearSegmentMonitor, mode, startVadWhisperPipeline]);
+    // webspeech is hands-free; tap does nothing
+  }, [flushPcmBuffer, mode]);
 
   useEffect(() => {
     if (enabled) {
       const forceServer = import.meta.env.VITE_FORCE_SERVER_STT === "true";
       if (forceServer) {
-        void startVadWhisperPipeline();
+        void startPcmWhisperPipeline();
       } else {
-        const SR =
-          (window as unknown as { SpeechRecognition?: typeof SpeechRecognition }).SpeechRecognition ||
-          (window as unknown as { webkitSpeechRecognition?: typeof SpeechRecognition }).webkitSpeechRecognition;
-        if (SR) {
-          const ok = startWebSpeech();
-          if (!ok) void startVadWhisperPipeline();
-        } else {
-          void startVadWhisperPipeline();
-        }
+        const ok = startWebSpeech();
+        if (!ok) void startPcmWhisperPipeline();
       }
     } else {
       stopListening();
     }
-    return () => {
-      stopListening();
-    };
+    return () => { stopListening(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
 
-  return {
-    listening,
-    partialTranscript,
-    mode,
-    startListening,
-    stopListening,
-    tapToSpeak,
-  };
+  return { listening, partialTranscript, mode, startListening, stopListening, tapToSpeak };
 }
+
+// ── Minimal browser type stubs ────────────────────────────────────────────
 
 interface SpeechRecognition extends EventTarget {
   continuous: boolean;
@@ -545,17 +469,11 @@ interface SpeechRecognition extends EventTarget {
   onerror: ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => void) | null;
   onend: ((this: SpeechRecognition, ev: Event) => void) | null;
 }
-
 interface SpeechRecognitionEvent extends Event {
   readonly resultIndex: number;
   readonly results: SpeechRecognitionResultList;
 }
-
 interface SpeechRecognitionErrorEvent extends Event {
   readonly error: string;
 }
-
-declare const SpeechRecognition: {
-  prototype: SpeechRecognition;
-  new (): SpeechRecognition;
-};
+declare const SpeechRecognition: { prototype: SpeechRecognition; new(): SpeechRecognition };

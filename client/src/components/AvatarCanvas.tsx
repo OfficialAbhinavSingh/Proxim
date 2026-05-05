@@ -67,9 +67,15 @@ class CanvasErrorBoundary extends Component<
   }
 }
 
-/** Simple placeholder avatar: head + torso + shoulders rendered with Three.js primitives. */
+/**
+ * Placeholder avatar rendered from Three.js primitives.
+ * BASE_Y = 0.52 puts the head at world-y ≈ 1.58, centred in the bust camera
+ * (camera at y=1.48 looking at y=1.46, fov=32 → visible range ≈ [1.22, 1.70]).
+ */
 function PlaceholderAvatar() {
   const { chunkStartedAt, visemes } = useAvatarTrackSubscription();
+  const BASE_Y = 0.52;
+
   const mouth = (t: number) => {
     if (!visemes.length) return 0;
     let cur: VisemeKeyframe = visemes[0];
@@ -86,17 +92,15 @@ function PlaceholderAvatar() {
 
   useFrame(() => {
     const now = performance.now() / 1000;
-    const idle = Math.sin(now * Math.PI * 2 * 0.25) * THREE.MathUtils.degToRad(4);
-    const bob = Math.sin(now * Math.PI * 2 * 0.18) * 0.03;
+    const idle = Math.sin(now * Math.PI * 2 * 0.25) * THREE.MathUtils.degToRad(3.5);
+    const bob = Math.sin(now * Math.PI * 2 * 0.18) * 0.018;
     if (g.current) {
       g.current.rotation.y = idle;
-      g.current.position.y = -0.6 + bob;
+      g.current.position.y = BASE_Y + bob;
     }
-
     const elapsed = chunkStartedAt != null ? Math.max(0, (performance.now() - chunkStartedAt) / 1000) : 0;
     const open = mouth(elapsed);
     if (m.current) {
-      // Scale "jaw" open/close.
       const targetY = 0.012 + open * 0.12;
       m.current.scale.y = THREE.MathUtils.lerp(m.current.scale.y, targetY, 0.25);
       m.current.position.y = 0.98 - open * 0.01;
@@ -104,54 +108,82 @@ function PlaceholderAvatar() {
   });
 
   return (
-    <group ref={g} position={[0, -0.48, 0]}>
-      {/* Torso */}
-      <mesh position={[0, 0.55, 0]}>
-        <cylinderGeometry args={[0.18, 0.22, 0.55, 16]} />
-        <meshStandardMaterial color="#1e40af" roughness={0.6} />
+    <group ref={g} position={[0, BASE_Y, 0]}>
+      {/* Jacket / torso */}
+      <mesh position={[0, 0.40, 0]}>
+        <cylinderGeometry args={[0.19, 0.25, 0.62, 18]} />
+        <meshStandardMaterial color="#1e3a5f" roughness={0.55} metalness={0.08} />
+      </mesh>
+      {/* White collar */}
+      <mesh position={[0, 0.73, 0.045]}>
+        <boxGeometry args={[0.13, 0.055, 0.035]} />
+        <meshStandardMaterial color="#e8e8e8" roughness={0.3} />
       </mesh>
       {/* Neck */}
-      <mesh position={[0, 0.87, 0]}>
-        <cylinderGeometry args={[0.065, 0.075, 0.12, 12]} />
-        <meshStandardMaterial color="#b45309" roughness={0.5} />
+      <mesh position={[0, 0.84, 0]}>
+        <cylinderGeometry args={[0.058, 0.068, 0.14, 12]} />
+        <meshStandardMaterial color="#c09275" roughness={0.5} />
       </mesh>
       {/* Head */}
       <mesh position={[0, 1.06, 0]}>
-        <sphereGeometry args={[0.155, 24, 24]} />
-        <meshStandardMaterial color="#d97706" roughness={0.4} />
+        <sphereGeometry args={[0.155, 28, 28]} />
+        <meshStandardMaterial color="#c8956c" roughness={0.35} />
       </mesh>
-      {/* Mouth (animated) */}
-      <mesh ref={m} position={[0, 0.98, 0.14]} scale={[0.11, 0.012, 0.02]}>
+      {/* Hair cap (hemisphere on top of head) */}
+      <mesh position={[0, 1.185, 0]} scale={[1.0, 0.55, 1.0]}>
+        <sphereGeometry args={[0.168, 20, 14, 0, Math.PI * 2, 0, Math.PI / 2]} />
+        <meshStandardMaterial color="#1a0a05" roughness={0.85} />
+      </mesh>
+      {/* Left eye white */}
+      <mesh position={[-0.057, 1.075, 0.134]}>
+        <sphereGeometry args={[0.023, 10, 10]} />
+        <meshStandardMaterial color="#f2f2f2" roughness={0.15} />
+      </mesh>
+      {/* Left pupil */}
+      <mesh position={[-0.057, 1.075, 0.154]}>
+        <sphereGeometry args={[0.012, 8, 8]} />
+        <meshStandardMaterial color="#120600" roughness={0.9} />
+      </mesh>
+      {/* Right eye white */}
+      <mesh position={[0.057, 1.075, 0.134]}>
+        <sphereGeometry args={[0.023, 10, 10]} />
+        <meshStandardMaterial color="#f2f2f2" roughness={0.15} />
+      </mesh>
+      {/* Right pupil */}
+      <mesh position={[0.057, 1.075, 0.154]}>
+        <sphereGeometry args={[0.012, 8, 8]} />
+        <meshStandardMaterial color="#120600" roughness={0.9} />
+      </mesh>
+      {/* Mouth (animated open/close) */}
+      <mesh ref={m} position={[0, 0.98, 0.143]} scale={[0.095, 0.012, 0.018]}>
         <boxGeometry args={[1, 1, 1]} />
-        <meshStandardMaterial color="#0f172a" roughness={0.8} />
+        <meshStandardMaterial color="#6b2737" roughness={0.7} />
       </mesh>
       {/* Left shoulder */}
-      <mesh position={[-0.28, 0.75, 0]}>
-        <sphereGeometry args={[0.07, 12, 12]} />
-        <meshStandardMaterial color="#1e40af" roughness={0.5} />
+      <mesh position={[-0.265, 0.70, 0]}>
+        <sphereGeometry args={[0.088, 12, 12]} />
+        <meshStandardMaterial color="#162e52" roughness={0.55} metalness={0.08} />
       </mesh>
       {/* Right shoulder */}
-      <mesh position={[0.28, 0.75, 0]}>
-        <sphereGeometry args={[0.07, 12, 12]} />
-        <meshStandardMaterial color="#1e40af" roughness={0.5} />
+      <mesh position={[0.265, 0.70, 0]}>
+        <sphereGeometry args={[0.088, 12, 12]} />
+        <meshStandardMaterial color="#162e52" roughness={0.55} metalness={0.08} />
       </mesh>
     </group>
-  );
-}
-
-/** Loading skeleton while GLB is fetching. */
-function LoadingAvatar() {
-  return (
-    <mesh>
-      <boxGeometry args={[0.35, 0.45, 0.22]} />
-      <meshStandardMaterial color="#334155" transparent opacity={0.5} />
-    </mesh>
   );
 }
 
 export function AvatarCanvas({ avatarUrl }: AvatarCanvasProps) {
   /** Final GLB URL after optional RPM proxy preflight (avoids 502 loop + runaway canvas when load fails). */
   const [gltfUrl, setGltfUrl] = useState<string | null>(null);
+  /**
+   * If the GLB hasn't loaded within AVATAR_LOAD_TIMEOUT_MS, stop waiting and show
+   * PlaceholderAvatar. This handles blocked / slow CDNs (e.g. models.readyplayer.me
+   * unreachable on some networks) without hanging the canvas forever.
+   */
+  // 30 s — RPM GLBs can be 5–20 MB; 5 s was firing before the download finished.
+  const AVATAR_LOAD_TIMEOUT_MS = 30_000;
+  const [avatarTimedOut, setAvatarTimedOut] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -219,6 +251,14 @@ export function AvatarCanvas({ avatarUrl }: AvatarCanvasProps) {
     };
   }, [avatarUrl]);
 
+  // Reset + start the per-URL load timeout whenever gltfUrl changes.
+  useEffect(() => {
+    if (!gltfUrl) return;
+    setAvatarTimedOut(false);
+    const id = setTimeout(() => setAvatarTimedOut(true), AVATAR_LOAD_TIMEOUT_MS);
+    return () => clearTimeout(id);
+  }, [gltfUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const fallbackOverlay = (
     <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
       {/* Mini Three.js-free placeholder when the whole canvas crashes */}
@@ -260,8 +300,15 @@ export function AvatarCanvas({ avatarUrl }: AvatarCanvasProps) {
             <PinBustCamera />
             <ambientLight intensity={0.55} />
             <directionalLight position={[2, 3, 2]} intensity={1.1} castShadow />
-            <Suspense fallback={<LoadingAvatar />}>
-              <AvatarModel url={gltfUrl} fallback={<PlaceholderAvatar />} />
+            {/* PlaceholderAvatar is used as both Suspense fallback and timeout fallback so
+                the canvas is never black: it shows instantly while the GLB loads, and
+                permanently when the CDN is unreachable (models.readyplayer.me blocked). */}
+            <Suspense fallback={<PlaceholderAvatar />}>
+              {avatarTimedOut ? (
+                <PlaceholderAvatar />
+              ) : (
+                <AvatarModel url={gltfUrl} fallback={<PlaceholderAvatar />} />
+              )}
               <ContactShadows opacity={0.45} scale={10} blur={2.4} far={4} position={[0, -1.42, 0]} />
               <Environment preset="city" />
             </Suspense>
