@@ -22,6 +22,14 @@ export interface SessionState {
     groqConfigured: boolean | null;
   };
 
+  /** Client-side timing for demo / tuning (ms from user send to first LLM text / first audio chunk). */
+  latency: {
+    active: boolean;
+    t0: number;
+    llmMs: number | null;
+    audioMs: number | null;
+  };
+
   setPersonaId: (id: string | null) => void;
   setSessionId: (id: string | null) => void;
   setSessionActive: (active: boolean) => void;
@@ -39,6 +47,11 @@ export interface SessionState {
   setCapabilities: (c: SessionState["capabilities"]) => void;
   setWsProtocolVersion: (v: number | null) => void;
   resetSession: () => void;
+
+  beginLatencyTurn: () => void;
+  markLlmLatencyIfNeeded: (assistantText: string) => void;
+  markAudioLatencyIfNeeded: () => void;
+  clearLatencyTurn: () => void;
 }
 
 export const useSessionStore = create<SessionState>((set) => ({
@@ -59,6 +72,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     elevenLabsConfigured: null,
     groqConfigured: null,
   },
+  latency: { active: false, t0: 0, llmMs: null, audioMs: null },
 
   setPersonaId: (personaId) => set({ personaId }),
   setSessionId: (sessionId) => set({ sessionId }),
@@ -89,6 +103,31 @@ export const useSessionStore = create<SessionState>((set) => ({
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setCapabilities: (capabilities) => set({ capabilities }),
   setWsProtocolVersion: (wsProtocolVersion) => set({ wsProtocolVersion }),
+
+  beginLatencyTurn: () =>
+    set({
+      latency: { active: true, t0: performance.now(), llmMs: null, audioMs: null },
+    }),
+  markLlmLatencyIfNeeded: (assistantText) =>
+    set((s) => {
+      if (!s.latency.active || s.latency.llmMs != null) return s;
+      if (!assistantText.trim()) return s;
+      return {
+        latency: { ...s.latency, llmMs: Math.round(performance.now() - s.latency.t0) },
+      };
+    }),
+  markAudioLatencyIfNeeded: () =>
+    set((s) => {
+      if (!s.latency.active || s.latency.audioMs != null) return s;
+      return {
+        latency: { ...s.latency, audioMs: Math.round(performance.now() - s.latency.t0) },
+      };
+    }),
+  clearLatencyTurn: () =>
+    set({
+      latency: { active: false, t0: 0, llmMs: null, audioMs: null },
+    }),
+
   resetSession: () =>
     set({
       sessionId: null,
@@ -105,6 +144,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         elevenLabsConfigured: null,
         groqConfigured: null,
       },
+      latency: { active: false, t0: 0, llmMs: null, audioMs: null },
     }),
 }));
 

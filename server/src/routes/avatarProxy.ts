@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -40,6 +40,21 @@ avatarProxyRouter.post("/upload-avatar", upload.single("file"), async (req, res)
   }
 });
 
+function rpmUpstreamUrl(id: string, query: Request["query"]): string {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(query)) {
+    if (v == null) continue;
+    if (Array.isArray(v)) {
+      for (const one of v) {
+        if (one != null) qs.append(k, String(one));
+      }
+    } else {
+      qs.append(k, String(v));
+    }
+  }
+  return `https://models.readyplayer.me/${id}.glb${qs.toString() ? `?${qs.toString()}` : ""}`;
+}
+
 /**
  * Proxies Ready Player Me GLB downloads through our server.
  *
@@ -49,8 +64,9 @@ avatarProxyRouter.post("/upload-avatar", upload.single("file"), async (req, res)
  *
  * Usage:
  *   GET /assets/rpm/<avatarId>.glb?<original query params>
+ *   HEAD — same status/headers as GET without streaming the body (client preflight).
  */
-avatarProxyRouter.get("/rpm/:id.glb", async (req, res) => {
+async function handleRpmProxy(req: Request, res: Response, method: "GET" | "HEAD"): Promise<void> {
   try {
     const id = String(req.params.id || "").trim();
     if (!/^[a-zA-Z0-9]+$/.test(id)) {
@@ -58,20 +74,10 @@ avatarProxyRouter.get("/rpm/:id.glb", async (req, res) => {
       return;
     }
 
-    // Forward all query params to RPM.
-    const qs = new URLSearchParams();
-    for (const [k, v] of Object.entries(req.query)) {
-      if (v == null) continue;
-      if (Array.isArray(v)) {
-        for (const one of v) qs.append(k, String(one));
-      } else {
-        qs.append(k, String(v));
-      }
-    }
-    const url = `https://models.readyplayer.me/${id}.glb${qs.toString() ? `?${qs.toString()}` : ""}`;
+    const url = rpmUpstreamUrl(id, req.query);
 
     const upstream = await fetch(url, {
-      // RPM responds with glb bytes; explicitly accept binary.
+      method,
       headers: { Accept: "model/gltf-binary,application/octet-stream,*/*" },
     });
 
@@ -81,18 +87,16 @@ avatarProxyRouter.get("/rpm/:id.glb", async (req, res) => {
       return;
     }
 
-    // Content type: GLB.
-    res.setHeader(
-      "Content-Type",
-      upstream.headers.get("content-type") ?? "model/gltf-binary"
-    );
-    // Allow the client to cache for a while.
+    res.setHeader("Content-Type", upstream.headers.get("content-type") ?? "model/gltf-binary");
     res.setHeader("Cache-Control", "public, max-age=3600");
 
-    // Stream body if available (runtime may expose web streams or node streams).
+    if (method === "HEAD") {
+      res.status(200).end();
+      return;
+    }
+
     const body = upstream.body as unknown;
     if (body && typeof (body as any).pipe === "function") {
-      // Node stream
       (body as any).pipe(res);
       return;
     }
@@ -107,11 +111,18 @@ avatarProxyRouter.get("/rpm/:id.glb", async (req, res) => {
       return;
     }
 
-    // Fallback: buffer.
     const buf = Buffer.from(await upstream.arrayBuffer());
     res.end(buf);
   } catch (e) {
     res.status(502).send(e instanceof Error ? e.message : "RPM proxy failed");
   }
+}
+
+avatarProxyRouter.head("/rpm/:id.glb", (req, res) => {
+  void handleRpmProxy(req, res, "HEAD");
+});
+
+avatarProxyRouter.get("/rpm/:id.glb", (req, res) => {
+  void handleRpmProxy(req, res, "GET");
 });
 

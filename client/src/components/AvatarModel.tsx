@@ -221,8 +221,10 @@ function AvatarModelInner({
     const feetY = -box.min.y * scale;
     const desiredFeetY = -1.25;
     // Clamp keeps the avatar from sinking out of view while still sitting nicely on the shadow plane.
-    const y = THREE.MathUtils.clamp(feetY, desiredFeetY - 0.2, desiredFeetY + 1.2);
-    g.position.set(-center.x * scale, y, -center.z * scale);
+    const yBase = THREE.MathUtils.clamp(feetY, desiredFeetY - 0.2, desiredFeetY + 1.2);
+    // Nudge avatar down slightly so shoulders enter frame under the bust camera.
+    const bustFrameNudge = -0.11;
+    g.position.set(-center.x * scale, yBase + bustFrameNudge, -center.z * scale);
   }, [clone]);
 
   const { applyFrame } = useAvatarMorphs(morphHost?.dict);

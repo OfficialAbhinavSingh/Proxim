@@ -21,23 +21,38 @@ sessionRouter.post("/transcribe", upload.single("audio"), async (req, res) => {
       res.status(400).json({ error: "missing audio" });
       return;
     }
-    const key = process.env.OPENAI_API_KEY;
-    if (!key) {
+    const openaiKey = process.env.OPENAI_API_KEY;
+    const groqKey = process.env.GROQ_API_KEY;
+    
+    if (!openaiKey && !groqKey) {
       res.status(501).json({
         text: "",
-        error: "Whisper fallback not configured (set OPENAI_API_KEY on the server).",
+        error: "Whisper fallback not configured (set GROQ_API_KEY or OPENAI_API_KEY).",
       });
       return;
     }
+
     const form = new FormData();
     const bytes = new Uint8Array(file.buffer);
     const blob = new Blob([bytes], { type: file.mimetype || "audio/webm" });
     form.append("file", blob, file.originalname || "clip.webm");
-    form.append("model", "whisper-1");
+    
+    let url: string;
+    let authKey: string;
+    
+    if (groqKey) {
+      url = "https://api.groq.com/openai/v1/audio/transcriptions";
+      authKey = groqKey;
+      form.append("model", "whisper-large-v3");
+    } else {
+      url = "https://api.openai.com/v1/audio/transcriptions";
+      authKey = openaiKey!;
+      form.append("model", "whisper-1");
+    }
 
-    const r = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    const r = await fetch(url, {
       method: "POST",
-      headers: { Authorization: `Bearer ${key}` },
+      headers: { Authorization: `Bearer ${authKey}` },
       body: form,
     });
     if (!r.ok) {
@@ -46,7 +61,17 @@ sessionRouter.post("/transcribe", upload.single("audio"), async (req, res) => {
       return;
     }
     const data = (await r.json()) as { text?: string };
-    res.json({ text: data.text ?? "" });
+    let text = (data.text ?? "").trim();
+    console.log(`[Whisper] Raw transcript: "${text}"`);
+    
+    // Filter out common Whisper silence hallucinations
+    const lower = text.toLowerCase();
+    if (lower === "you" || lower === "you." || lower === "thank you." || lower === "thank you") {
+      text = "";
+    }
+    
+    console.log(`[Whisper] Filtered transcript: "${text}"`);
+    res.json({ text });
   } catch (e) {
     res.status(500).json({ text: "", error: e instanceof Error ? e.message : "transcribe failed" });
   }

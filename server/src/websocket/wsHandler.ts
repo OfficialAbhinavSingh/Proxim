@@ -268,7 +268,7 @@ export function createWsHandler() {
   }
 
   async function sendIntro(ws: WebSocket, persona: Persona) {
-    const greeting = `[EMOTION:engaged]\nHello — I'm ${persona.name}. I only have a few minutes, but I'm listening. What should we focus on today?`;
+    const greeting = `[ENGAGED]\nHello — I'm ${persona.name}. I only have a few minutes, but I'm listening. What should we focus on today?`;
     const { emotion, displayText } = stripEmotionTag(greeting);
     safeSend(ws, {
       type: "transcript_update",
@@ -296,14 +296,9 @@ export function createWsHandler() {
         safeSend(ws, { type: "error", message: "Unknown persona" });
         return;
       }
-      sessions.set(msg.sessionId, { personaId: persona.id, messages: [] });
-      safeSend(ws, {
-        type: "session_start",
-        sessionId: msg.sessionId,
-        personaId: msg.personaId,
-      });
-      safeSend(ws, {
-        type: "capabilities",
+      const existing = sessions.get(msg.sessionId);
+      const cap = {
+        type: "capabilities" as const,
         sessionId: msg.sessionId,
         alignment: { available: !!process.env.ELEVENLABS_API_KEY },
         tts: {
@@ -311,10 +306,36 @@ export function createWsHandler() {
           groqConfigured: !!process.env.GROQ_API_KEY,
         },
         musetalk: { available: !!process.env.MUSETALK_URL },
+      };
+      if (existing?.messages.some((m) => m.role === "user")) {
+        safeSend(ws, {
+          type: "session_start",
+          sessionId: msg.sessionId,
+          personaId: msg.personaId,
+        });
+        safeSend(ws, cap);
+        return;
+      }
+      if (existing && !existing.messages.some((m) => m.role === "user")) {
+        safeSend(ws, {
+          type: "session_start",
+          sessionId: msg.sessionId,
+          personaId: msg.personaId,
+        });
+        safeSend(ws, cap);
+        return;
+      }
+
+      sessions.set(msg.sessionId, { personaId: persona.id, messages: [] });
+      safeSend(ws, {
+        type: "session_start",
+        sessionId: msg.sessionId,
+        personaId: msg.personaId,
       });
+      safeSend(ws, cap);
       await sendIntro(ws, persona);
       const intro = stripEmotionTag(
-        `[EMOTION:engaged]\nHello — I'm ${persona.name}. I only have a few minutes, but I'm listening. What should we focus on today?`
+        `[ENGAGED]\nHello — I'm ${persona.name}. I only have a few minutes, but I'm listening. What should we focus on today?`
       );
       const ctx0 = sessions.get(msg.sessionId);
       if (ctx0) {

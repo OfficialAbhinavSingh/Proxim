@@ -69,6 +69,7 @@ export function PersonaSelector({ personas, selectedId, onSelect, disabled }: Pe
             <p className="mt-2 line-clamp-1 text-xs text-muted">{p.hospital}</p>
             <p className="mt-1 line-clamp-2 text-xs italic text-muted/80">{p.personality}</p>
             <p className="mt-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+              {p.gender ? <>Gender: {p.gender} · </> : null}
               Mood: {p.mood}
             </p>
           </button>

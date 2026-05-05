@@ -1,10 +1,11 @@
 /**
  * Resolves an avatar URL from the persona config.
  *
- * - Full HTTPS/HTTP URLs are returned as-is.
- *   For Ready Player Me URLs only, the morphTargets query param is appended if missing so Oculus visemes are available.
- * - Local /avatars/*.glb paths fall back to VITE_DEFAULT_AVATAR_GLB or the bundled RPM demo.
- * - VITE_DEFAULT_AVATAR_GLB env var lets you swap in any GLB at build time.
+ * - Ready Player Me: in **dev**, defaults to same-origin `/__rpm/<id>.glb` (Vite proxies to models.readyplayer.me)
+ *   so the browser never has to resolve that host. In **production**, uses `VITE_HTTP_SERVER_URL` `/assets/rpm/`
+ *   unless `VITE_RPM_USE_PROXY=false` (then direct HTTPS to RPM).
+ * - Local `/avatars/*.glb` paths are returned as-is.
+ * - `VITE_DEFAULT_AVATAR_GLB` swaps the demo RPM fallback.
  */
 // Public RPM sample avatar (docs) — guaranteed to exist and can be requested with morphTargets.
 // If you have your own RPM avatar, set `VITE_DEFAULT_AVATAR_GLB` to it.
@@ -17,7 +18,7 @@ const VISEME_QUERY = "morphTargets=ARKit,Oculus%20Visemes";
 // (RPM may enable meshopt when requesting morph targets; forcing false avoids loader issues.)
 const RPM_COMPAT_QUERY = "useMeshOptCompression=false&useDracoMeshCompression=false";
 
-function ensureRpmQuery(url: string): string {
+export function ensureRpmQuery(url: string): string {
   const hasVisemes = url.includes("morphTargets=");
   const hasCompat =
     /(?:^|[?&])useMeshOptCompression=/i.test(url) || /(?:^|[?&])useDracoMeshCompression=/i.test(url);
@@ -44,6 +45,101 @@ function toLocalRpmProxy(url: string): string {
   }
 }
 
+/**
+ * Vite dev/preview only: same-origin path proxied to models.readyplayer.me (see vite.config `server.proxy`).
+ * Avoids browser DNS blocks / CORS on `models.readyplayer.me` while the dev server can still reach RPM.
+ */
+function toViteDevRpmPath(url: string): string {
+  try {
+    const u = new URL(url);
+    const m = /^\/([a-zA-Z0-9]+)\.glb$/.exec(u.pathname);
+    if (!m) return url;
+    return `/__rpm/${m[1]}.glb${u.search}`;
+  } catch {
+    return url;
+  }
+}
+
+function rpmResolvedLoadUrl(avatarUrl: string, useRpmProxy: boolean): string {
+  const preferViteDev =
+    import.meta.env.DEV && import.meta.env.VITE_RPM_USE_VITE_DEV_PROXY !== "false";
+  if (!avatarUrl) {
+    if (/^https?:\/\/models\.readyplayer\.me\//i.test(DEMO_RPM)) {
+      const q = ensureRpmQuery(DEMO_RPM);
+      if (!useRpmProxy) return q;
+      if (preferViteDev) return toViteDevRpmPath(q);
+      return toLocalRpmProxy(q);
+    }
+    return DEMO_RPM;
+  }
+  if (avatarUrl.startsWith("http://") || avatarUrl.startsWith("https://")) {
+    if (/^https?:\/\/models\.readyplayer\.me\//i.test(avatarUrl)) {
+      const q = ensureRpmQuery(avatarUrl);
+      if (!useRpmProxy) return q;
+      if (preferViteDev) return toViteDevRpmPath(q);
+      return toLocalRpmProxy(q);
+    }
+    return avatarUrl;
+  }
+  if (avatarUrl.startsWith("/")) return avatarUrl;
+  return avatarUrl;
+}
+
+/** Same-origin RPM fetch: Express `/assets/rpm/` or Vite dev `/__rpm/`. */
+export function isProxiedRpmAssetUrl(resolved: string): boolean {
+  if (resolved.startsWith("/__rpm/")) return true;
+  try {
+    const u = new URL(resolved, typeof window !== "undefined" ? window.location.href : "http://localhost");
+    return /\/assets\/rpm\//.test(u.pathname);
+  } catch {
+    return /\/assets\/rpm\//.test(resolved);
+  }
+}
+
+/**
+ * Browser-direct Ready Player Me GLB URL with viseme / compat query params.
+ * Use when the local RPM proxy is down (502) but the client can still reach models.readyplayer.me.
+ */
+export function resolveRpmDirectGlbUrl(sourceUrl: string): string {
+  if (!sourceUrl) return ensureRpmQuery(DEMO_RPM);
+  if (/^https?:\/\/models\.readyplayer\.me\//i.test(sourceUrl)) return ensureRpmQuery(sourceUrl);
+  return sourceUrl;
+}
+
+/** HTTPS Ready Player Me URL from persona config (or demo), or null if not RPM. */
+function rpmHttpsSourceFromPersona(avatarUrl: string): string | null {
+  const u = avatarUrl.trim();
+  if (/^https?:\/\/models\.readyplayer\.me\//i.test(u)) return u;
+  if (!u && /^https?:\/\/models\.readyplayer\.me\//i.test(DEMO_RPM)) return DEMO_RPM;
+  return null;
+}
+
+/**
+ * Ordered GLB URLs to try when loading RPM avatars (HEAD probe + loader).
+ * Dev: Vite `/__rpm` → API `/assets/rpm` on {@link import.meta.env.VITE_HTTP_SERVER_URL} → direct HTTPS.
+ */
+export function buildRpmLoadCandidateUrls(avatarUrl: string): string[] | null {
+  const src = rpmHttpsSourceFromPersona(avatarUrl);
+  if (!src) return null;
+  const q = ensureRpmQuery(src);
+  const useRpmProxy = import.meta.env.VITE_RPM_USE_PROXY !== "false";
+  const preferViteDev =
+    import.meta.env.DEV && import.meta.env.VITE_RPM_USE_VITE_DEV_PROXY !== "false";
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (x: string) => {
+    if (seen.has(x)) return;
+    seen.add(x);
+    out.push(x);
+  };
+  if (useRpmProxy) {
+    if (preferViteDev) add(toViteDevRpmPath(q));
+    add(toLocalRpmProxy(q));
+  }
+  add(q);
+  return out;
+}
+
 export function resolveAvatarUrl(avatarUrl: string): string {
   // Allow local override (uploaded avatar) without rebuilding.
   try {
@@ -52,16 +148,6 @@ export function resolveAvatarUrl(avatarUrl: string): string {
   } catch {
     // ignore
   }
-  if (!avatarUrl) return DEMO_RPM;
-  if (avatarUrl.startsWith("http://") || avatarUrl.startsWith("https://")) {
-    // Only Ready Player Me supports this parameter. Appending it to other hosts can break downloads.
-    if (/^https?:\/\/models\.readyplayer\.me\//i.test(avatarUrl)) {
-      // Route through our server proxy so browser network/CORS blockers don't kill avatar loading.
-      return toLocalRpmProxy(ensureRpmQuery(avatarUrl));
-    }
-    return avatarUrl;
-  }
-  // Local asset path (e.g. /avatars/*.glb). Use as-is so we don't depend on external CDNs.
-  if (avatarUrl.startsWith("/")) return avatarUrl;
-  return avatarUrl;
+  const useRpmProxy = import.meta.env.VITE_RPM_USE_PROXY !== "false";
+  return rpmResolvedLoadUrl(avatarUrl, useRpmProxy);
 }

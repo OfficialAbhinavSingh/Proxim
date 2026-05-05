@@ -21,7 +21,7 @@ export interface VisemeKeyframe {
   weight: number;
 }
 
-export type Emotion = "neutral" | "engaged" | "skeptical" | "positive";
+export type Emotion = "neutral" | "engaged" | "skeptical" | "concerned" | "positive";
 
 export interface Message {
   role: "user" | "assistant";
@@ -37,6 +37,9 @@ export interface Persona {
   hospital: string;
   personality: string;
   mood: string;
+  moodBaseline?: string;
+  /** Display / prompting hint only — swap `avatarUrl` to a matching Ready Player Me GLB. */
+  gender?: "female" | "male";
   avatarUrl: string;
   voiceId: string;
   systemPrompt: string;

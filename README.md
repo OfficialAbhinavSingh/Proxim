@@ -1,6 +1,6 @@
 # Proxim
 
-Proxim is a browser-based training lab where pharmaceutical sales representatives rehearse live conversations with AI-simulated healthcare professionals. Each persona speaks with streamed dialogue, ElevenLabs speech, and timestamp/alignment-derived viseme keyframes that drive a 3D avatar in Three.js, keeping voice and lip motion tightly coupled for a face-to-face feel without native binary installs.
+Proxim is a browser-based training lab where pharmaceutical sales representatives rehearse live conversations with AI-simulated healthcare professionals. Each persona speaks with streamed dialogue via ElevenLabs (optional, best lip-sync) or Groq TTS, with viseme keyframes that drive a 3D avatar in Three.js, keeping voice and lip motion coupled for a face-to-face feel without native binary installs.
 
 ## Architecture
 
@@ -18,8 +18,8 @@ Proxim is a browser-based training lab where pharmaceutical sales representative
 ┌─────────────────────────────────────────────────────────────────────┐
 │                 Node.js + Express + ws (TypeScript)                  │
 │  user_input ─▶ Claude Sonnet stream ─▶ sentence buffer              │
-│              ─▶ ElevenLabs with-timestamps (audio + alignment)       │
-│                  (text-viseme fallback if alignment unavailable)      │
+│              ─▶ ElevenLabs with-timestamps or Groq TTS (WAV)         │
+│                  (text-viseme fallback when alignment unavailable)    │
 │              ─▶ { audio_chunk + visemes } frames over WebSocket      │
 └─────────────────────────────────────────────────────────────────────┘
 ```
@@ -27,15 +27,16 @@ Proxim is a browser-based training lab where pharmaceutical sales representative
 ## Repository layout
 
 - `client/` — React 18, TypeScript, Vite, Tailwind, Zustand, React Three Fiber avatar renderer.
-- `server/` — Express HTTP + WebSocket server, Groq/Anthropic + ElevenLabs + alignment-based lip-sync.
+- `server/` — Express HTTP + WebSocket server, Groq/Anthropic LLM, ElevenLabs or Groq TTS, and alignment or text-based lip-sync.
 - `Dockerfile.server` + `docker-compose.yml` — containerized backend (no native binaries required).
 
 ## Prerequisites
 
 - Node.js 20+
-- Anthropic API key (`ANTHROPIC_API_KEY`)
-- ElevenLabs API key (`ELEVENLABS_API_KEY`) — voice IDs are pre-configured in `personas.json`
-- Optional: `OPENAI_API_KEY` for Whisper transcription when Web Speech API is unavailable
+- **Recommended minimum:** `GROQ_API_KEY` — free tier covers the LLM, persona TTS (WAV), and Whisper transcription on `/session/transcribe` when the browser cannot use Web Speech (VPN/proxy, some browsers, tap-to-speak).
+- **Optional:** `ANTHROPIC_API_KEY` — used for Claude when `GROQ_API_KEY` is not set.
+- **Optional:** `ELEVENLABS_API_KEY` — higher-quality TTS and audio-aligned visemes; omit it to use Groq TTS only (persona `voiceId` values remain ElevenLabs IDs for reference but Groq uses its own voice preset).
+- **Optional:** `OPENAI_API_KEY` — Whisper on `/session/transcribe` if you prefer OpenAI over Groq for audio transcription.
 
 ## Setup
 
@@ -46,7 +47,7 @@ cd proxim
 # Server
 cd server
 cp .env.example .env
-# Minimum: fill in ANTHROPIC_API_KEY and ELEVENLABS_API_KEY
+# Minimum: set GROQ_API_KEY (or ANTHROPIC_API_KEY + either GROQ_API_KEY or OPENAI_API_KEY for VPN-safe transcription)
 npm install
 npm run dev
 
@@ -66,7 +67,7 @@ Defaults:
 
 ```bash
 cp server/.env.example server/.env
-# Populate ANTHROPIC_API_KEY and ELEVENLABS_API_KEY
+# Populate at least GROQ_API_KEY (or your chosen LLM + transcription keys — see server/.env.example)
 docker compose up --build
 ```
 
@@ -97,7 +98,7 @@ All three use distinct Ready Player Me GLBs loaded via HTTPS — no local asset 
 
 - **Binary WebSocket frames**: audio is base64-encoded inside JSON for portability; high-throughput deployments should switch to length-prefixed binary frames.
 - **Sentence-first TTS**: the server buffers model output into speakable sentences (punctuation or ~220 chars) before ElevenLabs runs; this trades a little latency for stable sync windows.
-- **Whisper fallback**: requires `OPENAI_API_KEY` and is only used when Web Speech API / MediaRecorder path hits `/session/transcribe`.
+- **Whisper fallback**: `POST /session/transcribe` uses **Groq** (`GROQ_API_KEY`) or **OpenAI** (`OPENAI_API_KEY`) when Web Speech is unavailable (VPN, Firefox, MediaRecorder path). The client splits mic audio on **silence** (~1.5s) and sends each clip automatically. Set `VITE_FORCE_SERVER_STT=true` in `client/.env` to skip Web Speech entirely (recommended on VPN).
 - **Emotion blend shapes**: RPM models expose standard visemes; custom `emotion_*` morphs may be absent on some assets — weights then simply no-op.
 - **Mobile Safari**: Web Speech support varies; tap-to-speak + Whisper is the safest fallback.
 
@@ -105,6 +106,7 @@ All three use distinct Ready Player Me GLBs loaded via HTTPS — no local asset 
 
 - [Anthropic](https://www.anthropic.com/) — Claude API (see Anthropic Terms of Service).
 - [ElevenLabs](https://elevenlabs.io/) — Text-to-speech streaming (see ElevenLabs Terms).
+- [Groq](https://groq.com/) — Optional LLM, TTS, and Whisper-style transcription APIs.
 - [OpenAI](https://openai.com/) — Optional Whisper transcription.
 - [Ready Player Me](https://readyplayer.me/) — Avatar GLB models served via CDN.
 

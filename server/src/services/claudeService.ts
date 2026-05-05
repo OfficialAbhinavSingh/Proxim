@@ -20,25 +20,42 @@ function buildSystemPrompt(persona: Persona): string {
     ? `\n\nCOMPLIANCE GUARDRAIL: If the sales representative makes any off-label claim, cites unapproved data, or promotes a product outside its approved indication, respond with appropriate physician skepticism (e.g., "I'm not aware of that being an approved use — can you share the label details?"). Note the compliance concern naturally in your response.`
     : "";
 
+  const baseline = persona.moodBaseline ?? persona.mood;
+  const genderClause = persona.gender
+    ? `\nIn this simulation you are a ${persona.gender === "male" ? "male" : "female"} physician (match tone and lived experience accordingly).`
+    : "";
   return `You are ${persona.name}, a ${persona.specialty} at ${persona.hospital}.
 Personality: ${persona.personality}
-Current mood: ${persona.mood}
+Current mood: ${persona.mood} (baseline affect: ${baseline})${genderClause}
 
 You are in a meeting with a pharmaceutical sales representative. Respond naturally as this HCP would — be realistic, sometimes skeptical, sometimes curious. Keep responses to 2–4 sentences unless asked something complex.
 
-IMPORTANT: Begin every response with an emotion tag on its own line in this exact format:
-[EMOTION:neutral] or [EMOTION:engaged] or [EMOTION:skeptical] or [EMOTION:positive]
-Then your response text on the next line. The frontend strips this tag before displaying.${complianceClause}`;
+IMPORTANT: Before every response, output exactly one tag on its own line (uppercase), then your spoken reply immediately after with no blank line:
+[NEUTRAL] or [ENGAGED] or [SKEPTICAL] or [CONCERNED] or [POSITIVE]
+Do not explain the tag. Choose the emotion an HCP would naturally feel at this moment.
+
+For compatibility you may instead use the legacy form on its own line:
+[EMOTION:neutral] through [EMOTION:positive] plus [EMOTION:concerned]
+The system strips tags before text-to-speech.${complianceClause}`;
 }
 
-const EMOTION_RE = /^\[EMOTION:(neutral|engaged|skeptical|positive)\]\s*\n?/i;
+/** Preferred: [NEUTRAL]\\nAnswer… */
+const BRACKET_EMOTION_RE = /^\[(NEUTRAL|ENGAGED|SKEPTICAL|CONCERNED|POSITIVE)\]\s*\n?/i;
+/** Legacy: [EMOTION:neutral]\\n… */
+const LEGACY_EMOTION_RE = /^\[EMOTION:(neutral|engaged|skeptical|concerned|positive)\]\s*\n?/i;
 
 export function stripEmotionTag(raw: string): { emotion: Emotion; displayText: string } {
-  const m = raw.match(EMOTION_RE);
-  if (!m) return { emotion: "neutral", displayText: raw.trim() };
-  const emotion = m[1].toLowerCase() as Emotion;
-  const displayText = raw.replace(EMOTION_RE, "").trim();
-  return { emotion, displayText };
+  const bracket = raw.match(BRACKET_EMOTION_RE);
+  if (bracket) {
+    const emotion = bracket[1].toLowerCase() as Emotion;
+    return { emotion, displayText: raw.replace(BRACKET_EMOTION_RE, "").trim() };
+  }
+  const legacy = raw.match(LEGACY_EMOTION_RE);
+  if (legacy) {
+    const emotion = legacy[1].toLowerCase() as Emotion;
+    return { emotion, displayText: raw.replace(LEGACY_EMOTION_RE, "").trim() };
+  }
+  return { emotion: "neutral", displayText: raw.trim() };
 }
 
 // ── Groq streaming ────────────────────────────────────────────────────────────
@@ -127,7 +144,7 @@ export async function* streamClaudeResponse(
   // No key configured
   yield {
     textDelta:
-      "[EMOTION:neutral]\nI'm having trouble reaching my reasoning service right now. Please set GROQ_API_KEY or ANTHROPIC_API_KEY in server/.env",
+      "[NEUTRAL]\nI'm having trouble reaching my reasoning service right now. Please set GROQ_API_KEY or ANTHROPIC_API_KEY in server/.env",
   };
 }
 

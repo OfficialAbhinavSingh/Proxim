@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useAvatarStore } from "../store/avatarStore";
 import type { VisemeKeyframe, VisemeSource } from "../types";
 
@@ -25,6 +25,9 @@ type QueueItem = {
  */
 export function useAudioPlayback(onLastChunkEnded?: () => void) {
   const ctxRef = useRef<AudioContext | null>(null);
+  /** TTS passes through here so we can visualize levels without changing loudness. */
+  const masterGainRef = useRef<GainNode | null>(null);
+  const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null);
   const queueRef = useRef<QueueItem[]>([]);
   const playingRef = useRef(false);
   // Cancel any pending Web Speech utterance when a new chunk starts.
@@ -35,6 +38,15 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
     if (!ctx) {
       ctx = new AudioContext();
       ctxRef.current = ctx;
+      const gain = ctx.createGain();
+      gain.gain.value = 1;
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.82;
+      gain.connect(analyser);
+      analyser.connect(ctx.destination);
+      masterGainRef.current = gain;
+      setAnalyserNode(analyser);
     }
     if (ctx.state === "suspended") await ctx.resume();
     return ctx;
@@ -99,6 +111,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
       } else {
         // ── Real audio path (ElevenLabs or Groq WAV) ──
         const ctx = await ensureCtx();
+        const out = masterGainRef.current ?? ctx.destination;
         const bytes = Uint8Array.from(atob(next.audioBase64), (c) =>
           c.charCodeAt(0)
         );
@@ -110,7 +123,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
         await new Promise<void>((resolve) => {
           const src = ctx.createBufferSource();
           src.buffer = buffer;
-          src.connect(ctx.destination);
+          src.connect(out);
           src.onended = () => resolve();
           // Schedule slightly ahead to reduce jitter and align visemes to playback start.
           const leadSec = 0.005;
@@ -166,5 +179,5 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
     [pump]
   );
 
-  return { enqueue, ensureCtx };
+  return { enqueue, ensureCtx, analyserNode };
 }

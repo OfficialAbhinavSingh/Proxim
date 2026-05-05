@@ -35,15 +35,29 @@ export function VoiceInput({
           {listening ? "Listening" : "Mic idle"}
         </span>
         <span className="kicker">
-          Mode: {mode === "webspeech" ? "Web Speech API" : mode === "mediarecorder" ? "MediaRecorder" : mode}
+          Mode:{" "}
+          {mode === "webspeech"
+            ? "Web Speech API"
+            : mode === "vad_whisper"
+              ? "VAD + Whisper (fast phrase end)"
+              : mode === "server_stt"
+                ? "Server Whisper (silence splits)"
+                : mode}
         </span>
         <button
           type="button"
           onClick={onTapToSpeak}
-          disabled={!!tapBusy}
-          className="btn ml-auto px-4 py-2 text-sm md:hidden"
+          disabled={!!tapBusy || mode === "webspeech"}
+          title={
+            mode === "webspeech"
+              ? "Hands-free: pause ~0.5s after speaking to send"
+              : mode === "vad_whisper"
+                ? "Flush current speech segment to Whisper immediately"
+                : undefined
+          }
+          className="btn ml-auto px-4 py-2 text-sm"
         >
-          Tap to speak
+          {listening && (mode === "server_stt" || mode === "vad_whisper") ? "Send now" : "Tap to speak"}
         </button>
       </div>
       <p className="mt-3 min-h-[3rem] text-sm leading-relaxed text-fg">

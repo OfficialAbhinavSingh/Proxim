@@ -126,12 +126,20 @@ export function useAvatarMorphs(morphDict: Record<string, number> | undefined) {
 
   const emotionIndices = useMemo(() => {
     if (!morphDict) return {} as Record<string, number>;
-    const keys = ["emotion_neutral", "emotion_engaged", "emotion_skeptical", "emotion_positive"];
+    const keys = ["emotion_neutral", "emotion_engaged", "emotion_skeptical", "emotion_concerned", "emotion_positive"];
     const map: Record<string, number> = {};
     for (const k of keys) {
       if (typeof morphDict[k] === "number") map[k] = morphDict[k];
     }
     return map;
+  }, [morphDict]);
+
+  /** Case-insensitive morph name → index for ARKit emotion fallbacks. */
+  const emotionMorphLower = useMemo(() => {
+    if (!morphDict) return {} as Record<string, number>;
+    const lowerToIdx: Record<string, number> = {};
+    for (const [k, v] of Object.entries(morphDict)) lowerToIdx[normalizeKey(k)] = v;
+    return lowerToIdx;
   }, [morphDict]);
 
   const applyFrame = (
@@ -172,12 +180,33 @@ export function useAvatarMorphs(morphDict: Record<string, number> | undefined) {
       neutral: "emotion_neutral",
       engaged: "emotion_engaged",
       skeptical: "emotion_skeptical",
+      concerned: "emotion_concerned",
       positive: "emotion_positive",
     };
     const activeName = emNameByEmotion[emotion];
     for (const [n, i] of Object.entries(emotionIndices)) {
       const target = n === activeName ? 0.75 : 0;
       influences[i] = THREE.MathUtils.lerp(influences[i] ?? 0, target, LERP);
+    }
+
+    const arkitBoost: Partial<Record<Emotion, { names: string[]; w: number }[]>> = {
+      engaged: [{ names: ["browinnerupleft", "browinnerupright", "browinnerup_l", "browinnerup_r"], w: 0.38 }],
+      skeptical: [{ names: ["browdownleft", "browdownright", "browdown_l", "browdown_r"], w: 0.42 }],
+      concerned: [
+        { names: ["mouthfrownleft", "mouthfrownright", "mouthfrown_l", "mouthfrown_r"], w: 0.36 },
+        { names: ["browinnerupleft", "browinnerupright"], w: 0.2 },
+      ],
+      positive: [{ names: ["mouthsmileleft", "mouthsmileright", "mouthsmile_l", "mouthsmile_r"], w: 0.48 }],
+    };
+    const boosts = arkitBoost[emotion];
+    if (boosts) {
+      for (const group of boosts) {
+        for (const raw of group.names) {
+          const idx = emotionMorphLower[raw];
+          if (typeof idx !== "number") continue;
+          influences[idx] = THREE.MathUtils.lerp(influences[idx] ?? 0, group.w, LERP * 0.85);
+        }
+      }
     }
   };
 

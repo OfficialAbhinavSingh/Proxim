@@ -20,6 +20,9 @@ export interface AudioChunkPayload {
 
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
+  const intentionalCloseRef = useRef(false);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [connected, setConnected] = useState(false);
   const connectAttemptRef = useRef(0);
   const onAudioChunkRef = useRef<(p: AudioChunkPayload) => void>(() => {});
@@ -30,6 +33,7 @@ export function useWebSocket() {
   const setCurrentEmotion = useSessionStore((s) => s.setCurrentEmotion);
   const clearAssistantStream = useSessionStore((s) => s.clearAssistantStream);
   const setAssistantStreamingText = useSessionStore((s) => s.setAssistantStreamingText);
+  const markLlmLatencyIfNeeded = useSessionStore((s) => s.markLlmLatencyIfNeeded);
   const setCapabilities = useSessionStore((s) => s.setCapabilities);
   const setWsProtocolVersion = useSessionStore((s) => s.setWsProtocolVersion);
 
@@ -46,6 +50,11 @@ export function useWebSocket() {
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    intentionalCloseRef.current = false;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     const urls = candidateUrls();
     const attempt = connectAttemptRef.current % urls.length;
     const url = urls[attempt];
@@ -56,6 +65,7 @@ export function useWebSocket() {
     wsRef.current = ws;
     ws.onopen = () => {
       opened = true;
+      reconnectAttemptRef.current = 0;
       setConnected(true);
     };
     ws.onclose = () => {
@@ -67,6 +77,17 @@ export function useWebSocket() {
         onErrorRef.current(`WebSocket failed at ${url}, retrying ${urls[1]}...`);
         // Re-attempt with next candidate.
         queueMicrotask(() => connect());
+        return;
+      }
+      const active = useSessionStore.getState().isSessionActive;
+      if (!intentionalCloseRef.current && active && opened && reconnectAttemptRef.current < 8) {
+        reconnectAttemptRef.current += 1;
+        const delay = Math.min(10_000, 600 * reconnectAttemptRef.current);
+        reconnectTimerRef.current = setTimeout(() => {
+          reconnectTimerRef.current = null;
+          connect();
+        }, delay);
+        onErrorRef.current(`WebSocket disconnected — reconnecting (${reconnectAttemptRef.current}/8)…`);
       }
     };
     ws.onerror = () => {
@@ -106,6 +127,7 @@ export function useWebSocket() {
         }
         if (data.type === "transcript_update") {
           setCurrentEmotion(data.emotion);
+          markLlmLatencyIfNeeded(data.text);
           setAssistantStreamingText(data.text);
           onTranscriptRef.current(data.text, data.emotion);
           return;
@@ -126,12 +148,19 @@ export function useWebSocket() {
     candidateUrls,
     clearAssistantStream,
     setAssistantStreamingText,
+    markLlmLatencyIfNeeded,
     setCapabilities,
     setCurrentEmotion,
     setWsProtocolVersion,
   ]);
 
   const disconnect = useCallback(() => {
+    intentionalCloseRef.current = true;
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    reconnectAttemptRef.current = 0;
     wsRef.current?.close();
     wsRef.current = null;
     setConnected(false);

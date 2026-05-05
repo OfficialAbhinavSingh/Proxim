@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AvatarCanvas } from "./components/AvatarCanvas";
+import { LatencyHud } from "./components/LatencyHud";
+import { SpeakingWaveform } from "./components/SpeakingWaveform";
 import { PersonaSelector } from "./components/PersonaSelector";
 import { SessionControls } from "./components/SessionControls";
 import { Transcript } from "./components/Transcript";
+import { TextQuestionInput } from "./components/TextQuestionInput";
 import { VoiceInput } from "./components/VoiceInput";
 import { LipSyncDiagnostics } from "./components/LipSyncDiagnostics";
 import { ThemeToggle } from "./components/ThemeToggle";
@@ -40,6 +43,9 @@ export default function App() {
   const audioUnlocked = useSessionStore((s) => s.audioUnlocked);
   const setAudioUnlocked = useSessionStore((s) => s.setAudioUnlocked);
   const capabilities = useSessionStore((s) => s.capabilities);
+  const beginLatencyTurn = useSessionStore((s) => s.beginLatencyTurn);
+  const markAudioLatencyIfNeeded = useSessionStore((s) => s.markAudioLatencyIfNeeded);
+  const clearLatencyTurn = useSessionStore((s) => s.clearLatencyTurn);
 
   const {
     connected,
@@ -52,18 +58,19 @@ export default function App() {
     setOnScoreCard,
   } = useWebSocket();
 
-  const [awaitingWsStart, setAwaitingWsStart] = useState(false);
+  const prevWsConnected = useRef(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [scoreCard, setScoreCard] = useState<ScoreCardType | null>(null);
   const { theme, toggleTheme } = useTheme();
 
-  const { enqueue, ensureCtx } = useAudioPlayback(() => {
+  const { enqueue, ensureCtx, analyserNode } = useAudioPlayback(() => {
     completeAssistantTurn();
   });
 
   const handleUserText = useCallback(
     (text: string) => {
       if (!sessionId || !personaId || !text.trim()) return;
+      beginLatencyTurn();
       appendUserMessage(text.trim());
       send({
         type: "user_input",
@@ -72,7 +79,7 @@ export default function App() {
         personaId,
       });
     },
-    [appendUserMessage, personaId, send, sessionId]
+    [appendUserMessage, beginLatencyTurn, personaId, send, sessionId]
   );
 
   const { listening, partialTranscript, mode, startListening, stopListening, tapToSpeak } =
@@ -103,6 +110,7 @@ export default function App() {
           receivedAt,
         });
       }
+      markAudioLatencyIfNeeded();
       enqueue({
         audioBase64: chunk.audioBase64,
         audioMimeType: chunk.audioMimeType,
@@ -120,24 +128,26 @@ export default function App() {
     });
     setOnError((m) => setMicError(m));
     setOnScoreCard((card) => setScoreCard(card));
-  }, [enqueue, setOnAudioChunk, setOnError, setOnScoreCard, setOnTranscriptUpdate]);
+  }, [enqueue, markAudioLatencyIfNeeded, setOnAudioChunk, setOnError, setOnScoreCard, setOnTranscriptUpdate]);
 
   useEffect(() => {
-    if (!awaitingWsStart || !connected) return;
     const sid = useSessionStore.getState().sessionId;
     const pid = useSessionStore.getState().personaId;
-    if (sid && pid) send({ type: "session_start", sessionId: sid, personaId: pid });
-    setAwaitingWsStart(false);
-  }, [awaitingWsStart, connected, personaId, send]);
+    const active = useSessionStore.getState().isSessionActive;
+    if (connected && !prevWsConnected.current && active && sid && pid) {
+      send({ type: "session_start", sessionId: sid, personaId: pid });
+    }
+    prevWsConnected.current = connected;
+  }, [connected, send]);
 
   const handleStart = async () => {
     if (!personaId) return;
     setMicError(null);
     setScoreCard(null);
+    clearLatencyTurn();
     await ensureCtx();
     setAudioUnlocked(true);
     startSession();
-    setAwaitingWsStart(true);
     connect();
     void startListening();
   };
@@ -147,6 +157,7 @@ export default function App() {
     if (sid) send({ type: "session_end", sessionId: sid });
     stopListening();
     disconnect();
+    clearLatencyTurn();
     endSession();
   };
 
@@ -186,8 +197,8 @@ export default function App() {
         </div>
       </header>
 
-      <main className="container-app flex flex-1 flex-col gap-6 py-6 md:flex-row">
-        <section className="flex flex-1 flex-col gap-4">
+      <main className="container-app flex min-h-0 flex-1 flex-col gap-6 py-6 md:flex-row">
+        <section className="flex min-h-0 flex-1 flex-col gap-4">
           {!isSessionActive ? (
             <>
               <h2 className="font-display text-lg font-semibold">Choose a Simulated Physician</h2>
@@ -239,14 +250,23 @@ export default function App() {
                 </button>
               </div>
 
-              <AvatarCanvas avatarUrl={selectedPersona?.avatarUrl ?? ""} />
+              <div className="relative">
+                <LatencyHud />
+                <AvatarCanvas key={personaId ?? "none"} avatarUrl={selectedPersona?.avatarUrl ?? ""} />
+                <SpeakingWaveform analyser={analyserNode} />
+              </div>
 
               <VoiceInput
                 partialTranscript={partialTranscript}
                 listening={listening}
                 mode={mode}
-                onTapToSpeak={() => void tapToSpeak()}
+                onTapToSpeak={() => {
+                  void ensureCtx();
+                  void tapToSpeak();
+                }}
               />
+
+              <TextQuestionInput onSend={handleUserText} disabled={!connected} />
 
               {micError ? (
                 <p className="panel border border-border px-4 py-2 text-sm" style={{ borderColor: "rgba(245, 158, 11, 0.45)" }}>
@@ -278,7 +298,7 @@ export default function App() {
                     {!capabilities.elevenLabsConfigured && !capabilities.groqConfigured ? "none" : null}
                   </>
                 ) : null}{" "}
-                · Silence threshold 1.5s before sending to the model.
+                · Voice: Web Speech ~0.5s pause, or VAD + Whisper when Web Speech is unavailable.
               </p>
 
               <div className="flex items-center justify-between">
