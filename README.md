@@ -1,158 +1,229 @@
-# Proxim
+<div align="center">
 
-Proxim is a browser-based training lab where pharmaceutical sales reps rehearse live conversations with AI-simulated healthcare professionals. It streams LLM responses, drives a 3D avatar with lip-sync visemes, and keeps audio + facial motion tightly aligned — no native installs required.
+# 🩺 Proxim
 
-## Highlights
+### *Where pharma reps sharpen their edge — face to face with AI.*
 
-- **Real-time roleplay** with streaming AI physician responses and emotion tags.
-- **Voice-first practice** via Web Speech API with automatic silence detection and a server-side Whisper fallback.
-- **Lip-sync pipeline**: ElevenLabs alignment when available → Groq TTS + text-derived visemes → silence + Web Speech fallback.
-- **3D avatars in Three.js** with Ready Player Me proxy support and local GLB upload.
-- **Call debrief** scorecard with coaching metrics after each session.
-- **Latency HUD + diagnostics** for tuning LLM/TTS response time and viseme coverage.
+**Browser-native · Voice-first · Real-time lip sync · Scorecard coaching**
+
+[![Node.js](https://img.shields.io/badge/Node.js-20+-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org)
+[![React](https://img.shields.io/badge/React-18-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Groq](https://img.shields.io/badge/Groq-LLM%20%2B%20TTS%20%2B%20STT-F55036?style=flat-square)](https://groq.com)
+[![ElevenLabs](https://img.shields.io/badge/ElevenLabs-Voice%20AI-000000?style=flat-square)](https://elevenlabs.io)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
+
+</div>
+
+---
+
+## What is Proxim?
+
+Proxim is a **browser-based AI roleplay training lab** for pharmaceutical sales reps. You sit across from a photorealistic 3D avatar of a simulated physician — their mouth moves, their emotions shift, and they push back on your pitch — all in real time, with zero installs.
+
+After each session, Proxim hands you a graded **post-call debrief scorecard** covering clinical accuracy, objection handling, compliance adherence, and conversational tactics.
+
+> Think of it as a flight simulator for HCP conversations.
+
+---
+
+## ✅ What's Been Shipped
+
+### 🎙️ Voice Pipeline
+- **Web Speech API** transcription with **Voice Activity Detection (VAD)** — silence auto-triggers AI response
+- **Groq Whisper (`whisper-large-v3-turbo`)** server-side fallback for restricted network environments
+- **OpenAI Whisper** as a final STT safety net
+- **Force-server STT mode** (`VITE_FORCE_SERVER_STT=true`) for always-on accuracy
+- Manual PCM audio capture → base64 → `/session/transcribe` pipeline for environments that block the Web Speech API
+
+### 🗣️ TTS + Lip-Sync Stack
+- **ElevenLabs aligned TTS** — provides per-phoneme timestamps for frame-accurate viseme animation
+- **Groq TTS** (`playai-tts` voices) + text-derived synthetic viseme fallback
+- **Sentence-buffered streaming** — LLM output is chunked sentence-by-sentence to minimize first-audio latency
+- **Rhubarb-style viseme mapping** — 15 phoneme groups → ARKit morph targets (jawOpen, mouthSmile, etc.)
+- **Idle + gesture animation** — avatars breathe, blink, and shift weight between physician turns
+
+### 🧑‍⚕️ 3D Avatar System
+- **React Three Fiber** + **Three.js** rendering with full morph target animation
+- **Ready Player Me** GLB avatar support — with a **server-side proxy** (`/assets/rpm/:id.glb`) to bypass browser network blocks
+- **Local GLB upload** via the Lip-Sync Diagnostics panel
+- **5 pre-configured physician personas** with distinct specialties, moods, and compliance postures
+- Avatar URL correctly flows from `personas.json` → `avatarStore` → `AvatarModel` (fixed rendering regression)
+
+### 🏥 AI Physician Personas
+
+| Persona | Specialty | Mood | Compliance Mode |
+|---|---|---|---|
+| Dr. Sarah Chen | Oncology | Skeptical | ✅ MLR Enabled |
+| Dr. Raj Patel | Cardiology | Neutral | ✅ MLR Enabled |
+| Dr. Linda Williams | General Practice | Engaged | — |
+| Dr. Ji-Yeon Kim | Rheumatology | Concerned | ✅ MLR Enabled |
+| Dr. Miguel Rodriguez | Hospital Medicine | Positive | — |
+
+### 📊 Post-Call Scorecard
+- Automatically triggers at session end
+- Grades: **clinical data accuracy**, **objection handling**, **safety messaging**, **dosing accuracy**, **compliance language**
+- Animated score ring + per-criterion checklist
+- Claude Sonnet used as scorecard evaluator for nuanced judgment
+
+### 🛠️ Developer Tools
+- **Latency HUD** — live pipeline timing: LLM first-token, TTS start, total round-trip
+- **Lip-Sync Diagnostics panel** — viseme source, morph coverage %, playback latency, GLB upload
+- **Speaking Waveform** visualizer during AI audio playback
+- **Text input fallback** for non-voice environments
+- **Theme toggle** (dark / light)
+- **MLR Guardrail mode** — restricts AI to approved label language only
+
+---
 
 ## Architecture
 
 ```
-┌───────────────────────────────────────────────────────────────────────┐
-│                          Browser (React + Vite)                        │
-│  Voice input (Web Speech / PCM → Whisper)                              │
-│  WebSocket session + transcript stream                                 │
-│  Web Audio playback + viseme timeline                                  │
-│  React Three Fiber avatar (morphs, idle, gestures)                      │
-└───────────────────────────────────────────────────────────────────────┘
-                             │ ws:// + http://
-                             ▼
-┌───────────────────────────────────────────────────────────────────────┐
-│                 Node.js + Express + ws (TypeScript)                    │
-│  LLM stream (Groq Llama 3.3 → Claude fallback)                          │
-│  Sentence buffer → TTS → visemes → audio chunks over WS                │
-│  /session/transcribe (Groq Whisper → OpenAI fallback)                   │
-└───────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Browser (React 18 + Vite)                 │
+│                                                              │
+│  ┌──────────────┐  ┌────────────────┐  ┌─────────────────┐  │
+│  │ VoiceInput   │  │  AvatarCanvas  │  │   ScoreCard     │  │
+│  │ (VAD + STT)  │  │  (R3F + GLB)   │  │  (post-call)    │  │
+│  └──────┬───────┘  └───────┬────────┘  └────────┬────────┘  │
+│         │   sessionStore   │  avatarStore        │           │
+│         └──────────────────┴─────────────────────┘           │
+└───────────────────────┬─────────────────────────────────────┘
+                        │ WebSocket (ws://) + HTTP
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Node.js + Express + ws (TypeScript)             │
+│                                                              │
+│  LLM Stream      Groq Llama 3.3 70B → Claude Sonnet fallback │
+│  TTS Pipeline    ElevenLabs → Groq TTS → viseme synthesis    │
+│  STT Pipeline    Groq Whisper → OpenAI Whisper fallback      │
+│  Session WS      streaming audio chunks + viseme events      │
+│  Asset Proxy     RPM GLB proxy, local GLB upload             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## Repository layout
+---
 
-- `client/` — React 18 + Vite + Tailwind UI, WebSocket client, Web Audio playback, Three.js avatar.
-- `server/` — Express HTTP + WebSocket server, LLM/TTS/STT orchestration, persona config.
-- `Dockerfile.server` + `docker-compose.yml` — containerized backend (server only).
-
-## Quickstart (local)
+## Quickstart
 
 ### Prerequisites
 
-- Node.js 20+
-- **Recommended minimum:** `GROQ_API_KEY` (enables LLM, Groq TTS, and Groq Whisper STT)
-- **Optional:** `ANTHROPIC_API_KEY` (Claude fallback), `ELEVENLABS_API_KEY` (best lip-sync), `OPENAI_API_KEY` (Whisper fallback)
+- **Node.js 20+**
+- At minimum: `GROQ_API_KEY` *(enables LLM + TTS + STT)*
+- Optional: `ELEVENLABS_API_KEY` *(best lip-sync quality)*, `ANTHROPIC_API_KEY` *(Claude fallback + scorecard)*, `OPENAI_API_KEY` *(Whisper fallback)*
 
-### Run the backend
+### 1. Backend
 
 ```bash
 cd server
-cp .env.example .env
-# Set GROQ_API_KEY (or ANTHROPIC_API_KEY + OPENAI_API_KEY)
+cp .env.example .env        # fill in GROQ_API_KEY at minimum
 npm install
-npm run dev
+npm run dev                  # starts on http://localhost:3001
 ```
 
-### Run the client
+### 2. Frontend
 
 ```bash
 cd client
 cp .env.example .env
 npm install
-npm run dev
+npm run dev                  # starts on http://localhost:5173
 ```
 
-Defaults:
+Open **`http://localhost:5173`**, pick a persona, and start talking.
 
-- Client: `http://localhost:5173`
-- Server HTTP + WS: `http://localhost:3001` / `ws://localhost:3001`
+---
 
-## Configuration
+## Configuration Reference
 
-### Server (`server/.env`)
+### `server/.env`
 
-- `GROQ_API_KEY` — preferred LLM + TTS + Whisper STT provider
-- `ANTHROPIC_API_KEY` — Claude Sonnet fallback if Groq is not set
-- `ELEVENLABS_API_KEY` — highest-quality TTS + alignment timestamps
-- `ELEVENLABS_DEFAULT_VOICE_ID` — default voice if a persona is missing `voiceId`
-- `OPENAI_API_KEY` — Whisper fallback if Groq is unavailable
-- `GROQ_STT_MODEL` — default `whisper-large-v3-turbo`
-- `PERSONAS_PATH` — optional override for persona JSON
-- `PORT` — default `3001`
+| Variable | Description |
+|---|---|
+| `GROQ_API_KEY` | Primary LLM + TTS + Whisper STT |
+| `ANTHROPIC_API_KEY` | Claude Sonnet fallback (LLM + scorecard) |
+| `ELEVENLABS_API_KEY` | Highest-quality TTS + phoneme timestamps |
+| `ELEVENLABS_DEFAULT_VOICE_ID` | Fallback voice ID when persona has none |
+| `OPENAI_API_KEY` | Whisper fallback if Groq STT unavailable |
+| `GROQ_STT_MODEL` | Default: `whisper-large-v3-turbo` |
+| `PERSONAS_PATH` | Override default persona JSON path |
+| `PORT` | Default: `3001` |
 
-### Client (`client/.env`)
+### `client/.env`
 
-- `VITE_WS_URL` — WebSocket endpoint (default `ws://localhost:3001`)
-- `VITE_API_URL` — REST base for `/session/transcribe`
-- `VITE_HTTP_SERVER_URL` — server base for `/assets/rpm` avatar proxy
-- `VITE_RPM_USE_PROXY` — set `false` to bypass the proxy and hit Ready Player Me directly
-- `VITE_RPM_USE_VITE_DEV_PROXY` — dev-only RPM proxy via Vite `/__rpm`
-- `VITE_FORCE_SERVER_STT` — set `true` to always use server Whisper
-- `VITE_DEFAULT_AVATAR_GLB` — override the fallback Ready Player Me avatar URL
+| Variable | Description |
+|---|---|
+| `VITE_WS_URL` | WebSocket endpoint (`ws://localhost:3001`) |
+| `VITE_API_URL` | REST base for `/session/transcribe` |
+| `VITE_HTTP_SERVER_URL` | Server base for avatar proxy |
+| `VITE_RPM_USE_PROXY` | `false` to bypass server proxy |
+| `VITE_FORCE_SERVER_STT` | `true` to always use Groq Whisper |
+| `VITE_DEFAULT_AVATAR_GLB` | Fallback avatar GLB URL |
 
-## Personas & avatars
+---
 
-Personas are defined in **both** `client/src/config/personas.json` and `server/src/config/personas.json`.
-Keep them in sync or use `PERSONAS_PATH` on the server.
+## Personas & Avatars
 
-| ID | Name | Specialty | Mood | Compliance Mode |
-|---|---|---|---|---|
-| `dr_chen_oncologist` | Dr. Sarah Chen | Oncology | Skeptical | ✅ |
-| `dr_patel_cardiologist` | Dr. Raj Patel | Cardiology | Neutral | ✅ |
-| `dr_williams_gp` | Dr. Linda Williams | General Practice | Engaged | ❌ |
-| `dr_kim_rheumatologist` | Dr. Ji-Yeon Kim | Rheumatology | Concerned | ✅ |
-| `dr_rodriguez_hospitalist` | Dr. Miguel Rodriguez | Hospital Medicine | Positive | ❌ |
+Persona configs live in **both** `client/src/config/personas.json` and `server/src/config/personas.json` (keep in sync, or point `PERSONAS_PATH` at a shared file).
 
-### Avatar sources
+Each persona defines: `name`, `specialty`, `systemPrompt`, `voiceId`, `avatarUrl`, `complianceMode`, and `mood`.
 
-- Current persona configs point at `/avatars/*.glb` (served from `client/public/avatars`).
-- If you don’t have local GLBs, either:
-  - Replace `avatarUrl` with a Ready Player Me URL, or
-  - Upload a GLB from **Lip-sync diagnostics → Upload .glb**, which stores it in `/avatars/`.
-- The server also provides a Ready Player Me proxy at `GET /assets/rpm/:id.glb` to avoid browser network blocks.
+**Avatar options:**
+- `avatarUrl: "/avatars/<name>.glb"` — serve a local GLB from `client/public/avatars/`
+- `avatarUrl: "<Ready Player Me URL>"` — fetched through the server proxy to avoid CORS blocks
+- Upload a custom GLB via **Diagnostics → Upload .glb** at runtime
 
-## Runtime features
+---
 
-- **Live transcript + call log** while the LLM streams.
-- **Latency HUD** showing server pipeline timing (LLM first token, TTS start, total).
-- **Lip-sync diagnostics** (viseme source, morph coverage, playback latency, GLB upload).
-- **Scorecard debrief** after each session (clinical data, objections, safety, dosing, compliance).
+## API Reference
 
-## API surface
+| Endpoint | Method | Description |
+|---|---|---|
+| `/health` | GET | Service health check |
+| `/session/transcribe` | POST | Audio blob → text (Groq Whisper → OpenAI) |
+| `/assets/upload-avatar` | POST | Upload `.glb` to `/avatars/uploaded-avatar.glb` |
+| `/assets/rpm/:id.glb` | GET | Ready Player Me reverse proxy |
+| `ws://localhost:3001` | WS | Session lifecycle + streaming audio + visemes |
 
-- `GET /health` — service health check
-- `POST /session/transcribe` — audio → text (Groq Whisper → OpenAI fallback)
-- `POST /assets/upload-avatar` — upload a local `.glb` for `/avatars/uploaded-avatar.glb`
-- `GET /assets/rpm/:id.glb` — Ready Player Me proxy (preserves query params)
-- WebSocket: `ws://localhost:3001` — session start/end + streaming audio chunks
+---
 
-## Docker (backend only)
+## Docker (backend)
 
 ```bash
 cp server/.env.example server/.env
-# Populate at least GROQ_API_KEY
+# add GROQ_API_KEY
 
 docker compose up --build
 ```
 
-The client still runs via `npm run dev` unless you build and serve the static assets yourself.
+The client runs separately via `npm run dev` (or build static assets and serve them yourself).
 
-## Known limitations
+---
 
-- Audio chunks are base64-encoded inside JSON frames (portable, not bandwidth-optimal).
-- TTS is buffered sentence-by-sentence to reduce jitter and improve lip-sync.
-- No persistence: sessions and transcripts are in-memory only.
+## Known Limitations
 
-## Third-party APIs
+- Audio is base64-encoded in JSON WebSocket frames — portable but not bandwidth-optimal
+- No session persistence — transcripts and scores are in-memory only
+- MuseTalk video-frame streaming bridge is implemented but **disabled by default** (`museTalkService.ts`)
 
-- [Groq](https://groq.com/) — LLM, TTS, Whisper STT
-- [Anthropic](https://www.anthropic.com/) — Claude Sonnet fallback
-- [ElevenLabs](https://elevenlabs.io/) — aligned TTS + viseme timestamps
-- [OpenAI](https://openai.com/) — Whisper fallback
-- [Ready Player Me](https://readyplayer.me/) — avatar GLB hosting
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, Vite, TypeScript, Tailwind CSS |
+| 3D Rendering | React Three Fiber, Three.js, @react-three/drei |
+| State | Zustand (`sessionStore`, `avatarStore`) |
+| Backend | Node.js, Express, `ws` (WebSocket) |
+| LLM | Groq Llama 3.3 70B, Anthropic Claude Sonnet |
+| TTS | ElevenLabs, Groq TTS (playai-tts) |
+| STT | Groq Whisper, OpenAI Whisper, Web Speech API |
+| Avatars | Ready Player Me, local GLB |
+| Infra | Docker, docker-compose |
+
+---
 
 ## License
 
-MIT
+MIT © 2026 Proxim
