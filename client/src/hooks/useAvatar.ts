@@ -3,8 +3,8 @@ import * as THREE from "three";
 import type { Emotion, VisemeKeyframe, VisemeKey } from "../types";
 import { useAvatarStore, visemeToMorphName } from "../store/avatarStore";
 
-const LERP = 0.35;
-const TRANSITION_WINDOW_SEC = 0.07;
+const LERP = 0.22;
+const TRANSITION_WINDOW_SEC = 0.12;
 
 const ALL_VISEMES: VisemeKey[] = [
   "sil",
@@ -25,9 +25,56 @@ const ALL_VISEMES: VisemeKey[] = [
 ];
 
 type MorphIndexMap = Record<string, number>;
+type FallbackRecipeStep = { names: string[]; weight: number };
+type FallbackRecipe = FallbackRecipeStep[];
+type ExpressionStep = { names: string[]; weight: number };
+
+const EMOTION_MORPH_RECIPES: Record<Emotion, ExpressionStep[]> = {
+  neutral: [],
+  engaged: [
+    { names: ["browinnerupleft", "browinnerupright", "browinnerup_l", "browinnerup_r"], weight: 0.42 },
+    { names: ["cheeksquintleft", "cheeksquintright", "cheeksquint_l", "cheeksquint_r"], weight: 0.14 },
+    { names: ["mouthsmileleft", "mouthsmileright", "mouthsmile_l", "mouthsmile_r"], weight: 0.18 },
+    { names: ["jawforward"], weight: 0.08 },
+  ],
+  skeptical: [
+    { names: ["browdownleft", "browdown_l"], weight: 0.54 },
+    { names: ["browinnerupright", "browinnerup_r"], weight: 0.2 },
+    { names: ["eyesquintleft", "eyesquint_l"], weight: 0.18 },
+    { names: ["mouthpressleft", "mouthpressright"], weight: 0.34 },
+    { names: ["mouthfrownleft", "mouthfrown_l"], weight: 0.16 },
+    { names: ["mouthshrugupper"], weight: 0.12 },
+  ],
+  concerned: [
+    { names: ["browinnerupleft", "browinnerupright", "browinnerup_l", "browinnerup_r"], weight: 0.46 },
+    { names: ["browouterupleft", "browouterupright", "browouterup_l", "browouterup_r"], weight: 0.22 },
+    { names: ["mouthfrownleft", "mouthfrownright", "mouthfrown_l", "mouthfrown_r"], weight: 0.38 },
+    { names: ["mouthshrugupper", "mouthshruglower"], weight: 0.22 },
+    { names: ["eyeswideleft", "eyeswideright", "eyeswide_l", "eyeswide_r"], weight: 0.12 },
+  ],
+  positive: [
+    { names: ["mouthsmileleft", "mouthsmileright", "mouthsmile_l", "mouthsmile_r"], weight: 0.58 },
+    { names: ["cheeksquintleft", "cheeksquintright", "cheeksquint_l", "cheeksquint_r"], weight: 0.24 },
+    { names: ["browouterupleft", "browouterupright", "browouterup_l", "browouterup_r"], weight: 0.12 },
+    { names: ["mouthdimpleleft", "mouthdimpleright"], weight: 0.18 },
+  ],
+};
+
+const SPEAKING_MORPH_RECIPES: ExpressionStep[] = [
+  { names: ["browinnerupleft", "browinnerupright", "browinnerup_l", "browinnerup_r"], weight: 0.1 },
+  { names: ["eyesquintleft", "eyesquintright", "eyesquint_l", "eyesquint_r"], weight: 0.08 },
+  { names: ["cheeksquintleft", "cheeksquintright", "cheeksquint_l", "cheeksquint_r"], weight: 0.12 },
+  { names: ["noseSneerLeft", "noseSneerRight", "nosesneerleft", "nosesneerright"], weight: 0.06 },
+  { names: ["mouthsmileleft", "mouthsmileright", "mouthsmile_l", "mouthsmile_r"], weight: 0.08 },
+  { names: ["mouthstretchleft", "mouthstretchright"], weight: 0.12 },
+];
 
 function normalizeKey(k: string): string {
   return k.trim().toLowerCase();
+}
+
+function clamp01(value: number): number {
+  return THREE.MathUtils.clamp(value, 0, 1);
 }
 
 function firstIndex(dict: MorphIndexMap, candidates: string[]): number | undefined {
@@ -40,22 +87,65 @@ function firstIndex(dict: MorphIndexMap, candidates: string[]): number | undefin
 
 // Fallback mapping when a model doesn't ship Oculus viseme_* targets (common on ARKit rigs).
 // We drive a handful of mouth/jaw shapes so the avatar still "speaks" in demos.
-const FALLBACK_MORPHS_BY_VISEME: Partial<Record<VisemeKey, string[]>> = {
-  sil: ["mouthClose", "jawOpen", "mouthOpen"],
-  PP: ["mouthClose", "mouthPressLeft", "mouthPressRight", "mouthShrugUpper", "mouthShrugLower"],
-  FF: ["mouthFunnel", "mouthPucker", "mouthRollUpper", "mouthRollLower", "mouthClose"],
-  TH: ["tongueOut", "mouthOpen", "jawOpen"],
-  DD: ["jawOpen", "mouthOpen", "mouthClose"],
-  kk: ["jawOpen", "mouthOpen"],
-  CH: ["mouthFunnel", "mouthPucker", "jawOpen", "mouthOpen"],
-  SS: ["mouthSmileLeft", "mouthSmileRight", "mouthStretchLeft", "mouthStretchRight", "mouthOpen"],
-  nn: ["jawOpen", "mouthClose", "mouthShrugLower"],
-  RR: ["mouthFunnel", "mouthPucker", "jawOpen"],
-  aa: ["jawOpen", "mouthOpen"],
-  E: ["mouthSmileLeft", "mouthSmileRight", "mouthOpen"],
-  ih: ["mouthSmileLeft", "mouthSmileRight", "jawOpen", "mouthOpen"],
-  oh: ["mouthFunnel", "mouthPucker", "jawOpen"],
-  ou: ["mouthPucker", "mouthFunnel", "jawOpen"],
+const FALLBACK_MORPHS_BY_VISEME: Partial<Record<VisemeKey, FallbackRecipe>> = {
+  sil: [
+    { names: ["mouthClose", "mouthPressLeft", "mouthPressRight"], weight: 0.16 },
+    { names: ["jawOpen", "mouthOpen"], weight: 0 },
+  ],
+  PP: [
+    { names: ["mouthClose", "mouthPressLeft", "mouthPressRight"], weight: 0.96 },
+    { names: ["mouthShrugUpper", "mouthShrugLower"], weight: 0.28 },
+  ],
+  FF: [
+    { names: ["mouthFunnel", "mouthPucker"], weight: 0.72 },
+    { names: ["mouthRollUpper", "mouthRollLower"], weight: 0.36 },
+    { names: ["mouthClose"], weight: 0.18 },
+  ],
+  TH: [
+    { names: ["tongueOut"], weight: 0.84 },
+    { names: ["mouthOpen", "jawOpen"], weight: 0.52 },
+  ],
+  DD: [
+    { names: ["jawOpen", "mouthOpen"], weight: 0.44 },
+    { names: ["mouthClose"], weight: 0.22 },
+  ],
+  kk: [{ names: ["jawOpen", "mouthOpen"], weight: 0.56 }],
+  CH: [
+    { names: ["mouthFunnel", "mouthPucker"], weight: 0.46 },
+    { names: ["jawOpen", "mouthOpen"], weight: 0.42 },
+    { names: ["mouthStretchLeft", "mouthStretchRight"], weight: 0.18 },
+  ],
+  SS: [
+    { names: ["mouthSmileLeft", "mouthSmileRight"], weight: 0.34 },
+    { names: ["mouthStretchLeft", "mouthStretchRight"], weight: 0.56 },
+    { names: ["mouthOpen"], weight: 0.18 },
+  ],
+  nn: [
+    { names: ["mouthClose"], weight: 0.42 },
+    { names: ["jawOpen"], weight: 0.26 },
+    { names: ["mouthShrugLower"], weight: 0.22 },
+  ],
+  RR: [
+    { names: ["mouthFunnel", "mouthPucker"], weight: 0.52 },
+    { names: ["jawOpen"], weight: 0.22 },
+  ],
+  aa: [{ names: ["jawOpen", "mouthOpen"], weight: 0.94 }],
+  E: [
+    { names: ["mouthSmileLeft", "mouthSmileRight"], weight: 0.46 },
+    { names: ["mouthOpen"], weight: 0.34 },
+  ],
+  ih: [
+    { names: ["mouthSmileLeft", "mouthSmileRight"], weight: 0.34 },
+    { names: ["jawOpen", "mouthOpen"], weight: 0.38 },
+  ],
+  oh: [
+    { names: ["mouthFunnel", "mouthPucker"], weight: 0.56 },
+    { names: ["jawOpen"], weight: 0.36 },
+  ],
+  ou: [
+    { names: ["mouthPucker", "mouthFunnel"], weight: 0.74 },
+    { names: ["jawOpen"], weight: 0.2 },
+  ],
 };
 
 function pickVisemeBlendAtTime(
@@ -105,21 +195,31 @@ export function useAvatarMorphs(morphDict: Record<string, number> | undefined) {
 
   const fallback = useMemo(() => {
     if (!morphDict) {
-      return { hasOculusVisemes: false, lowerToIdx: {} as MorphIndexMap, idxByViseme: {} as Partial<Record<VisemeKey, number>>, usedIndices: [] as number[] };
+      return {
+        hasOculusVisemes: false,
+        lowerToIdx: {} as MorphIndexMap,
+        idxByViseme: {} as Partial<Record<VisemeKey, Array<{ index: number; weight: number }>>>,
+        usedIndices: [] as number[],
+      };
     }
     const lowerToIdx: MorphIndexMap = {};
     for (const [k, v] of Object.entries(morphDict)) lowerToIdx[normalizeKey(k)] = v;
 
     const hasOculusVisemes = Object.keys(lowerToIdx).some((k) => k.startsWith("viseme_") || k.includes("viseme"));
-    const idxByViseme: Partial<Record<VisemeKey, number>> = {};
+    const idxByViseme: Partial<Record<VisemeKey, Array<{ index: number; weight: number }>>> = {};
     const used: number[] = [];
     for (const v of ALL_VISEMES) {
-      const list = FALLBACK_MORPHS_BY_VISEME[v] ?? [];
-      const idx = firstIndex(lowerToIdx, list);
-      if (typeof idx === "number") {
-        idxByViseme[v] = idx;
+      const recipe = FALLBACK_MORPHS_BY_VISEME[v] ?? [];
+      const seen = new Set<number>();
+      const resolved: Array<{ index: number; weight: number }> = [];
+      for (const step of recipe) {
+        const idx = firstIndex(lowerToIdx, step.names);
+        if (typeof idx !== "number" || seen.has(idx)) continue;
+        seen.add(idx);
+        resolved.push({ index: idx, weight: step.weight });
         used.push(idx);
       }
+      if (resolved.length) idxByViseme[v] = resolved;
     }
     return { hasOculusVisemes, lowerToIdx, idxByViseme, usedIndices: Array.from(new Set(used)) };
   }, [morphDict]);
@@ -142,11 +242,44 @@ export function useAvatarMorphs(morphDict: Record<string, number> | undefined) {
     return lowerToIdx;
   }, [morphDict]);
 
+  const expressionIndices = useMemo(() => {
+    const resolved: Record<Emotion, Array<{ index: number; weight: number }>> = {
+      neutral: [],
+      engaged: [],
+      skeptical: [],
+      concerned: [],
+      positive: [],
+    };
+    const controlled = new Set<number>();
+
+    (Object.keys(EMOTION_MORPH_RECIPES) as Emotion[]).forEach((emotion) => {
+      for (const step of EMOTION_MORPH_RECIPES[emotion]) {
+        const idx = firstIndex(emotionMorphLower, step.names);
+        if (typeof idx !== "number") continue;
+        resolved[emotion].push({ index: idx, weight: step.weight });
+        controlled.add(idx);
+      }
+    });
+
+    return { byEmotion: resolved, controlled: Array.from(controlled) };
+  }, [emotionMorphLower]);
+
+  const speakingIndices = useMemo(() => {
+    const resolved: Array<{ index: number; weight: number }> = [];
+    for (const step of SPEAKING_MORPH_RECIPES) {
+      const idx = firstIndex(emotionMorphLower, step.names);
+      if (typeof idx !== "number") continue;
+      resolved.push({ index: idx, weight: step.weight });
+    }
+    return resolved;
+  }, [emotionMorphLower]);
+
   const applyFrame = (
     influences: number[],
     elapsed: number,
     frames: VisemeKeyframe[],
-    emotion: Emotion
+    emotion: Emotion,
+    speakingStrength = 0
   ) => {
     const { curKey, curWeight, nextKey, nextWeight, alpha } = pickVisemeBlendAtTime(frames, elapsed);
 
@@ -162,18 +295,21 @@ export function useAvatarMorphs(morphDict: Record<string, number> | undefined) {
         influences[idx] = THREE.MathUtils.lerp(influences[idx] ?? 0, target, LERP);
       }
     } else {
-      // ARKit-ish fallback: drive one best mouth/jaw target per viseme.
+      // ARKit-ish fallback: blend a small recipe of mouth/jaw targets per viseme.
       // Zero all used fallback indices first to avoid carryover.
       for (const idx of fallback.usedIndices) {
         influences[idx] = THREE.MathUtils.lerp(influences[idx] ?? 0, 0, LERP);
       }
-      const setTarget = (v: VisemeKey, w: number) => {
-        const idx = fallback.idxByViseme[v];
-        if (typeof idx !== "number") return;
-        influences[idx] = THREE.MathUtils.lerp(influences[idx] ?? 0, w, LERP);
+      const setTargets = (v: VisemeKey, w: number) => {
+        const targets = fallback.idxByViseme[v];
+        if (!targets?.length) return;
+        for (const target of targets) {
+          const next = clamp01(w * target.weight);
+          influences[target.index] = THREE.MathUtils.lerp(influences[target.index] ?? 0, next, LERP);
+        }
       };
-      setTarget(curKey, curWeight * (1 - alpha));
-      setTarget(nextKey, nextWeight * alpha);
+      setTargets(curKey, curWeight * (1 - alpha));
+      setTargets(nextKey, nextWeight * alpha);
     }
 
     const emNameByEmotion: Record<Emotion, string> = {
@@ -189,24 +325,26 @@ export function useAvatarMorphs(morphDict: Record<string, number> | undefined) {
       influences[i] = THREE.MathUtils.lerp(influences[i] ?? 0, target, LERP);
     }
 
-    const arkitBoost: Partial<Record<Emotion, { names: string[]; w: number }[]>> = {
-      engaged: [{ names: ["browinnerupleft", "browinnerupright", "browinnerup_l", "browinnerup_r"], w: 0.38 }],
-      skeptical: [{ names: ["browdownleft", "browdownright", "browdown_l", "browdown_r"], w: 0.42 }],
-      concerned: [
-        { names: ["mouthfrownleft", "mouthfrownright", "mouthfrown_l", "mouthfrown_r"], w: 0.36 },
-        { names: ["browinnerupleft", "browinnerupright"], w: 0.2 },
-      ],
-      positive: [{ names: ["mouthsmileleft", "mouthsmileright", "mouthsmile_l", "mouthsmile_r"], w: 0.48 }],
-    };
-    const boosts = arkitBoost[emotion];
-    if (boosts) {
-      for (const group of boosts) {
-        for (const raw of group.names) {
-          const idx = emotionMorphLower[raw];
-          if (typeof idx !== "number") continue;
-          influences[idx] = THREE.MathUtils.lerp(influences[idx] ?? 0, group.w, LERP * 0.85);
-        }
-      }
+    const expressionBase =
+      emotion === "neutral" ? Math.max(0.04, speakingStrength * 0.14) : 0.18 + speakingStrength * 0.72;
+    const active = new Map<number, number>();
+    for (const step of expressionIndices.byEmotion[emotion]) {
+      active.set(step.index, step.weight * expressionBase);
+    }
+    for (const idx of expressionIndices.controlled) {
+      const target = active.get(idx) ?? 0;
+      influences[idx] = THREE.MathUtils.lerp(influences[idx] ?? 0, target, LERP * 0.82);
+    }
+
+    const speechTargetBase = speakingStrength * 0.34;
+    for (const step of speakingIndices) {
+      const dynamicTarget =
+        speechTargetBase * step.weight * (curKey === "PP" || curKey === "FF" ? 0.65 : curKey === "aa" || curKey === "oh" ? 1.18 : 1);
+      influences[step.index] = THREE.MathUtils.lerp(
+        influences[step.index] ?? 0,
+        Math.max(influences[step.index] ?? 0, dynamicTarget),
+        LERP * 0.74
+      );
     }
   };
 
@@ -214,29 +352,68 @@ export function useAvatarMorphs(morphDict: Record<string, number> | undefined) {
 }
 
 export function useAvatarIdleClock() {
-  const blinkRef = useRef({ nextAt: 0, phase: "open" as "open" | "close", until: 0 });
-  const tRef = useRef(0);
+  const blinkRef = useRef({
+    nextAt: 0,
+    state: "idle" as "idle" | "closing" | "opening",
+    phaseStartedAt: 0,
+    blinkStrength: 1,
+    pendingDoubleBlink: false,
+  });
 
-  const tickIdle = (dt: number, head: THREE.Object3D, influences: number[] | undefined, blinkIdx: number | undefined) => {
-    tRef.current += dt;
-    const t = tRef.current;
-    // Make motion slightly more obvious (helps verify the render loop is alive).
-    head.rotation.y = Math.sin(t * Math.PI * 2 * 0.25) * THREE.MathUtils.degToRad(6);
-    head.rotation.x = Math.sin(t * Math.PI * 2 * 0.125) * THREE.MathUtils.degToRad(3);
-    const s = 1 + Math.sin(t * Math.PI * 2 * 0.2) * 0.014;
-    head.scale.setScalar(s);
-
-    if (typeof blinkIdx !== "number" || !influences) return;
+  const tickIdle = (
+    influences: number[] | undefined,
+    blinkIndices: number[],
+    dt: number,
+    blinkBias = 0
+  ) => {
+    if (!blinkIndices.length || !influences) return 0;
     const now = performance.now() / 1000;
-    if (blinkRef.current.phase === "open" && now >= blinkRef.current.nextAt) {
-      blinkRef.current.phase = "close";
-      blinkRef.current.until = now + 0.15;
-    } else if (blinkRef.current.phase === "close" && now >= blinkRef.current.until) {
-      blinkRef.current.phase = "open";
-      blinkRef.current.nextAt = now + 3 + Math.random() * 2;
+    const closeDur = 0.055 + dt * 0.15;
+    const openDur = 0.09 + dt * 0.2;
+    const state = blinkRef.current;
+
+    if (state.nextAt === 0) {
+      state.nextAt = now + 2.4 + Math.random() * 1.8;
     }
-    const blink = blinkRef.current.phase === "close" ? 1 : 0;
-    influences[blinkIdx] = THREE.MathUtils.lerp(influences[blinkIdx] ?? 0, blink, 0.45);
+
+    if (state.state === "idle" && now + blinkBias >= state.nextAt) {
+      state.state = "closing";
+      state.phaseStartedAt = now;
+      state.blinkStrength = THREE.MathUtils.clamp(0.84 + Math.random() * 0.26 + blinkBias * 0.35, 0.8, 1);
+      state.pendingDoubleBlink = Math.random() < 0.18;
+    } else if (state.state === "closing" && now - state.phaseStartedAt >= closeDur) {
+      state.state = "opening";
+      state.phaseStartedAt = now;
+    } else if (state.state === "opening" && now - state.phaseStartedAt >= openDur) {
+      if (state.pendingDoubleBlink) {
+        state.pendingDoubleBlink = false;
+        state.state = "closing";
+        state.phaseStartedAt = now + 0.05;
+        state.nextAt = now + 0.05;
+      } else {
+        state.state = "idle";
+        state.phaseStartedAt = now;
+        state.nextAt = now + 2.6 + Math.random() * 2.2;
+      }
+    }
+
+    let blink = 0;
+    if (state.state === "closing") {
+      const progress = THREE.MathUtils.clamp((now - state.phaseStartedAt) / closeDur, 0, 1);
+      blink = THREE.MathUtils.smoothstep(progress, 0, 1) * state.blinkStrength;
+    } else if (state.state === "opening") {
+      const progress = THREE.MathUtils.clamp((now - state.phaseStartedAt) / openDur, 0, 1);
+      blink = (1 - THREE.MathUtils.smoothstep(progress, 0, 1)) * state.blinkStrength;
+    }
+
+    const leftBias = 0.95 + Math.sin(now * 7.1) * 0.03;
+    const rightBias = 0.95 + Math.cos(now * 6.3) * 0.03;
+    blinkIndices.forEach((idx, index) => {
+      const eyeBias = index % 2 === 0 ? leftBias : rightBias;
+      influences[idx] = THREE.MathUtils.lerp(influences[idx] ?? 0, blink * eyeBias, 0.42);
+    });
+
+    return blink;
   };
 
   return { tickIdle };

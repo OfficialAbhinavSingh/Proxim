@@ -22,6 +22,8 @@ export interface AvatarPlaybackState {
     resolvedUrl: string | null;
     loadError: string | null;
     loadedAt: number | null;
+    renderMode: "unknown" | "loading" | "gltf" | "fallback";
+    contextLossCount: number;
   };
 }
 
@@ -53,7 +55,7 @@ export const useAvatarStore = create<AvatarStore>((set) => ({
   lastChunk: { sentenceIndex: null, isSilence: null, visemeSource: null, receivedAt: null },
   visemeMorphCount: null,
   morphHost: { meshName: null, morphKeySample: [], totalMorphTargets: null },
-  avatarAsset: { resolvedUrl: null, loadError: null, loadedAt: null },
+  avatarAsset: { resolvedUrl: null, loadError: null, loadedAt: null, renderMode: "unknown", contextLossCount: 0 },
 
   setVisemeTrack: (visemes, chunkStartedAt, meta) =>
     set((s) => ({
@@ -71,14 +73,16 @@ export const useAvatarStore = create<AvatarStore>((set) => ({
   setMorphHostInfo: (info) => set((s) => ({ morphHost: { ...s.morphHost, ...info } })),
   setAvatarAssetInfo: (info) => set((s) => ({ avatarAsset: { ...s.avatarAsset, ...info } })),
   clearVisemeTrack: () =>
-    set({
+    set((s) => ({
       visemes: [],
       chunkStartedAt: null,
-      lastChunk: { sentenceIndex: null, isSilence: null, visemeSource: null, receivedAt: null },
-      visemeMorphCount: null,
-      morphHost: { meshName: null, morphKeySample: [], totalMorphTargets: null },
-      avatarAsset: { resolvedUrl: null, loadError: null, loadedAt: null },
-    }),
+      lastChunk: s.lastChunk,
+      // Keep model diagnostics intact across turns so the session can still report
+      // whether the loaded avatar supports visemes/emotions after playback completes.
+      visemeMorphCount: s.visemeMorphCount,
+      morphHost: s.morphHost,
+      avatarAsset: s.avatarAsset,
+    })),
 }));
 
 /** RPM / Oculus viseme morph target naming convention */

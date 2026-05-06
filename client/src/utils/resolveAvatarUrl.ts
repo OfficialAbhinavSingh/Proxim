@@ -45,6 +45,12 @@ function toLocalRpmProxy(url: string): string {
   }
 }
 
+function toHttpServerAssetPath(pathname: string): string {
+  const serverBase = (import.meta.env.VITE_HTTP_SERVER_URL as string | undefined) ?? "http://localhost:3001";
+  const normalized = pathname.startsWith("/") ? pathname : `/${pathname}`;
+  return `${serverBase.replace(/\/+$/, "")}${normalized}`;
+}
+
 /**
  * Vite dev/preview only: same-origin path proxied to models.readyplayer.me (see vite.config `server.proxy`).
  * Avoids browser DNS blocks / CORS on `models.readyplayer.me` while the dev server can still reach RPM.
@@ -140,11 +146,32 @@ export function buildRpmLoadCandidateUrls(avatarUrl: string): string[] | null {
   return out;
 }
 
-export function resolveAvatarUrl(avatarUrl: string): string {
-  // Allow local override (uploaded avatar) without rebuilding.
+/**
+ * Ordered candidate URLs for local `/avatars/*.glb` assets.
+ * Browser-first keeps the fast path for Vite/public assets, with a localhost API
+ * fallback for cases where the page origin differs from the asset host.
+ */
+export function buildLocalAvatarLoadCandidateUrls(avatarUrl: string): string[] | null {
+  if (!avatarUrl.startsWith("/")) return null;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (x: string) => {
+    if (seen.has(x)) return;
+    seen.add(x);
+    out.push(x);
+  };
+  add(avatarUrl);
+  add(toHttpServerAssetPath(avatarUrl));
+  return out;
+}
+
+export function resolveAvatarUrl(avatarUrl: string, overrideKey?: string | null): string {
+  // Persona-specific local override so one uploaded avatar never leaks into every doctor.
   try {
-    const override = window.localStorage.getItem("proxim.avatarOverrideUrl");
-    if (override && override.trim()) return override.trim();
+    if (overrideKey) {
+      const override = window.localStorage.getItem(`proxim.avatarOverrideUrl:${overrideKey}`);
+      if (override && override.trim()) return override.trim();
+    }
   } catch {
     // ignore
   }

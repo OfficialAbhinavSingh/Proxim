@@ -1,9 +1,10 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Environment, ContactShadows } from "@react-three/drei";
+import { Html } from "@react-three/drei";
 import { Component, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ErrorInfo, ReactNode } from "react";
 import { AvatarModel } from "./AvatarModel";
 import {
+  buildLocalAvatarLoadCandidateUrls,
   buildRpmLoadCandidateUrls,
   isProxiedRpmAssetUrl,
   resolveAvatarUrl,
@@ -11,9 +12,12 @@ import {
 import * as THREE from "three";
 import { useAvatarTrackSubscription } from "../hooks/useAvatar";
 import type { VisemeKeyframe, VisemeKey } from "../types";
+import { useSessionStore } from "../store/sessionStore";
+import { useAvatarStore } from "../store/avatarStore";
 
 interface AvatarCanvasProps {
   avatarUrl: string;
+  personaId?: string | null;
 }
 
 /**
@@ -24,8 +28,8 @@ interface AvatarCanvasProps {
 function PinBustCamera() {
   const camera = useThree((s) => s.camera);
   const size = useThree((s) => s.size);
-  const pos = useMemo(() => new THREE.Vector3(0, 1.48, 0.82), []);
-  const target = useMemo(() => new THREE.Vector3(0, 1.46, 0), []);
+  const pos = useMemo(() => new THREE.Vector3(0, 1.68, 0.68), []);
+  const target = useMemo(() => new THREE.Vector3(0, 1.62, 0.02), []);
 
   useFrame(() => {
     camera.position.copy(pos);
@@ -67,6 +71,28 @@ class CanvasErrorBoundary extends Component<
   }
 }
 
+function WebglRecoveryBridge({
+  onContextLost,
+}: {
+  onContextLost: () => void;
+}) {
+  const gl = useThree((s) => s.gl);
+
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const handleContextLost = (event: Event) => {
+      event.preventDefault();
+      onContextLost();
+    };
+    canvas.addEventListener("webglcontextlost", handleContextLost as EventListener, { passive: false });
+    return () => {
+      canvas.removeEventListener("webglcontextlost", handleContextLost as EventListener);
+    };
+  }, [gl, onContextLost]);
+
+  return null;
+}
+
 /**
  * Placeholder avatar rendered from Three.js primitives.
  * BASE_Y = 0.52 puts the head at world-y ≈ 1.58, centred in the bust camera
@@ -74,6 +100,7 @@ class CanvasErrorBoundary extends Component<
  */
 function PlaceholderAvatar() {
   const { chunkStartedAt, visemes } = useAvatarTrackSubscription();
+  const emotion = useSessionStore((s) => s.currentEmotion);
   const BASE_Y = 0.52;
 
   const mouth = (t: number) => {
@@ -89,6 +116,48 @@ function PlaceholderAvatar() {
 
   const g = useRef<THREE.Group>(null);
   const m = useRef<THREE.Mesh>(null);
+  const browLeft = useRef<THREE.Mesh>(null);
+  const browRight = useRef<THREE.Mesh>(null);
+  const eyeLeft = useRef<THREE.Group>(null);
+  const eyeRight = useRef<THREE.Group>(null);
+  const lidLeft = useRef<THREE.Mesh>(null);
+  const lidRight = useRef<THREE.Mesh>(null);
+  const shoulderLeft = useRef<THREE.Mesh>(null);
+  const shoulderRight = useRef<THREE.Mesh>(null);
+  const emotionPose = useMemo(() => {
+    const byEmotion = {
+      neutral: { browLift: 0, browTilt: 0, mouthBias: 0, headTilt: 0, headPitch: 0 },
+      engaged: {
+        browLift: 0.012,
+        browTilt: 0.006,
+        mouthBias: 0.01,
+        headTilt: THREE.MathUtils.degToRad(1.5),
+        headPitch: THREE.MathUtils.degToRad(1.2),
+      },
+      skeptical: {
+        browLift: 0.008,
+        browTilt: -0.014,
+        mouthBias: -0.002,
+        headTilt: THREE.MathUtils.degToRad(-3.5),
+        headPitch: THREE.MathUtils.degToRad(0.5),
+      },
+      concerned: {
+        browLift: 0.018,
+        browTilt: 0.01,
+        mouthBias: -0.008,
+        headTilt: THREE.MathUtils.degToRad(-1.5),
+        headPitch: THREE.MathUtils.degToRad(3.5),
+      },
+      positive: {
+        browLift: 0.01,
+        browTilt: 0.01,
+        mouthBias: 0.016,
+        headTilt: THREE.MathUtils.degToRad(2.5),
+        headPitch: THREE.MathUtils.degToRad(-1.6),
+      },
+    } as const;
+    return byEmotion[emotion];
+  }, [emotion]);
 
   useFrame(() => {
     const now = performance.now() / 1000;
@@ -96,14 +165,52 @@ function PlaceholderAvatar() {
     const bob = Math.sin(now * Math.PI * 2 * 0.18) * 0.018;
     if (g.current) {
       g.current.rotation.y = idle;
+      g.current.rotation.z = THREE.MathUtils.lerp(
+        g.current.rotation.z,
+        emotionPose.headTilt + Math.sin(now * Math.PI * 2 * 0.12) * THREE.MathUtils.degToRad(1.5),
+        0.14
+      );
+      g.current.rotation.x = THREE.MathUtils.lerp(
+        g.current.rotation.x,
+        emotionPose.headPitch + Math.sin(now * Math.PI * 2 * 0.22) * THREE.MathUtils.degToRad(1.1),
+        0.14
+      );
       g.current.position.y = BASE_Y + bob;
     }
     const elapsed = chunkStartedAt != null ? Math.max(0, (performance.now() - chunkStartedAt) / 1000) : 0;
     const open = mouth(elapsed);
+    const blinkPhase = Math.sin(now * Math.PI * 2 * 0.16);
+    const blinkPulse = blinkPhase > 0.975 ? THREE.MathUtils.smoothstep(blinkPhase, 0.975, 1) : 0;
+    const gazeX = Math.sin(now * Math.PI * 2 * 0.09) * 0.01 + Math.sin(now * Math.PI * 2 * 0.37) * 0.004;
+    const gazeY = Math.cos(now * Math.PI * 2 * 0.07) * 0.008;
+    const gesture = THREE.MathUtils.smoothstep(open, 0.05, 0.55);
     if (m.current) {
-      const targetY = 0.012 + open * 0.12;
+      const targetY = 0.012 + open * 0.12 + emotionPose.mouthBias;
       m.current.scale.y = THREE.MathUtils.lerp(m.current.scale.y, targetY, 0.25);
       m.current.position.y = 0.98 - open * 0.01;
+      m.current.scale.x = THREE.MathUtils.lerp(m.current.scale.x, 0.92 + open * 0.2, 0.2);
+    }
+    if (browLeft.current && browRight.current) {
+      browLeft.current.position.y = THREE.MathUtils.lerp(browLeft.current.position.y, 1.135 + emotionPose.browLift, 0.16);
+      browRight.current.position.y = THREE.MathUtils.lerp(browRight.current.position.y, 1.135 + emotionPose.browLift, 0.16);
+      browLeft.current.rotation.z = THREE.MathUtils.lerp(browLeft.current.rotation.z, -0.28 - emotionPose.browTilt, 0.16);
+      browRight.current.rotation.z = THREE.MathUtils.lerp(browRight.current.rotation.z, 0.28 + emotionPose.browTilt, 0.16);
+    }
+    if (eyeLeft.current && eyeRight.current) {
+      eyeLeft.current.position.x = -0.057 + gazeX;
+      eyeRight.current.position.x = 0.057 + gazeX;
+      eyeLeft.current.position.y = 1.075 + gazeY;
+      eyeRight.current.position.y = 1.075 + gazeY;
+    }
+    if (lidLeft.current && lidRight.current) {
+      const lidScale = 1 - blinkPulse * 0.94;
+      lidLeft.current.scale.y = THREE.MathUtils.lerp(lidLeft.current.scale.y, lidScale, 0.42);
+      lidRight.current.scale.y = THREE.MathUtils.lerp(lidRight.current.scale.y, lidScale, 0.42);
+    }
+    if (shoulderLeft.current && shoulderRight.current) {
+      const swing = Math.sin(now * Math.PI * 2 * 0.43) * THREE.MathUtils.degToRad(5.5) * gesture;
+      shoulderLeft.current.rotation.z = THREE.MathUtils.lerp(shoulderLeft.current.rotation.z, 0.18 + swing, 0.14);
+      shoulderRight.current.rotation.z = THREE.MathUtils.lerp(shoulderRight.current.rotation.z, -0.18 - swing, 0.14);
     }
   });
 
@@ -134,25 +241,41 @@ function PlaceholderAvatar() {
         <sphereGeometry args={[0.168, 20, 14, 0, Math.PI * 2, 0, Math.PI / 2]} />
         <meshStandardMaterial color="#1a0a05" roughness={0.85} />
       </mesh>
-      {/* Left eye white */}
-      <mesh position={[-0.057, 1.075, 0.134]}>
-        <sphereGeometry args={[0.023, 10, 10]} />
-        <meshStandardMaterial color="#f2f2f2" roughness={0.15} />
+      <mesh ref={browLeft} position={[-0.06, 1.135, 0.138]} rotation={[0, 0, -0.28]}>
+        <boxGeometry args={[0.05, 0.008, 0.01]} />
+        <meshStandardMaterial color="#1f120d" roughness={0.9} />
       </mesh>
-      {/* Left pupil */}
-      <mesh position={[-0.057, 1.075, 0.154]}>
-        <sphereGeometry args={[0.012, 8, 8]} />
-        <meshStandardMaterial color="#120600" roughness={0.9} />
+      <mesh ref={browRight} position={[0.06, 1.135, 0.138]} rotation={[0, 0, 0.28]}>
+        <boxGeometry args={[0.05, 0.008, 0.01]} />
+        <meshStandardMaterial color="#1f120d" roughness={0.9} />
       </mesh>
-      {/* Right eye white */}
-      <mesh position={[0.057, 1.075, 0.134]}>
-        <sphereGeometry args={[0.023, 10, 10]} />
-        <meshStandardMaterial color="#f2f2f2" roughness={0.15} />
+      <group ref={eyeLeft} position={[-0.057, 1.075, 0.134]}>
+        <mesh>
+          <sphereGeometry args={[0.023, 10, 10]} />
+          <meshStandardMaterial color="#f2f2f2" roughness={0.15} />
+        </mesh>
+        <mesh position={[0, 0, 0.02]}>
+          <sphereGeometry args={[0.012, 8, 8]} />
+          <meshStandardMaterial color="#120600" roughness={0.9} />
+        </mesh>
+      </group>
+      <group ref={eyeRight} position={[0.057, 1.075, 0.134]}>
+        <mesh>
+          <sphereGeometry args={[0.023, 10, 10]} />
+          <meshStandardMaterial color="#f2f2f2" roughness={0.15} />
+        </mesh>
+        <mesh position={[0, 0, 0.02]}>
+          <sphereGeometry args={[0.012, 8, 8]} />
+          <meshStandardMaterial color="#120600" roughness={0.9} />
+        </mesh>
+      </group>
+      <mesh ref={lidLeft} position={[-0.057, 1.09, 0.142]} scale={[1, 1, 1]}>
+        <boxGeometry args={[0.05, 0.028, 0.012]} />
+        <meshStandardMaterial color="#c8956c" roughness={0.65} />
       </mesh>
-      {/* Right pupil */}
-      <mesh position={[0.057, 1.075, 0.154]}>
-        <sphereGeometry args={[0.012, 8, 8]} />
-        <meshStandardMaterial color="#120600" roughness={0.9} />
+      <mesh ref={lidRight} position={[0.057, 1.09, 0.142]} scale={[1, 1, 1]}>
+        <boxGeometry args={[0.05, 0.028, 0.012]} />
+        <meshStandardMaterial color="#c8956c" roughness={0.65} />
       </mesh>
       {/* Mouth (animated open/close) */}
       <mesh ref={m} position={[0, 0.98, 0.143]} scale={[0.095, 0.012, 0.018]}>
@@ -160,12 +283,12 @@ function PlaceholderAvatar() {
         <meshStandardMaterial color="#6b2737" roughness={0.7} />
       </mesh>
       {/* Left shoulder */}
-      <mesh position={[-0.265, 0.70, 0]}>
+      <mesh ref={shoulderLeft} position={[-0.265, 0.70, 0]}>
         <sphereGeometry args={[0.088, 12, 12]} />
         <meshStandardMaterial color="#162e52" roughness={0.55} metalness={0.08} />
       </mesh>
       {/* Right shoulder */}
-      <mesh position={[0.265, 0.70, 0]}>
+      <mesh ref={shoulderRight} position={[0.265, 0.70, 0]}>
         <sphereGeometry args={[0.088, 12, 12]} />
         <meshStandardMaterial color="#162e52" roughness={0.55} metalness={0.08} />
       </mesh>
@@ -173,9 +296,12 @@ function PlaceholderAvatar() {
   );
 }
 
-export function AvatarCanvas({ avatarUrl }: AvatarCanvasProps) {
+export function AvatarCanvas({ avatarUrl, personaId }: AvatarCanvasProps) {
+  void PlaceholderAvatar;
   /** Final GLB URL after optional RPM proxy preflight (avoids 502 loop + runaway canvas when load fails). */
   const [gltfUrl, setGltfUrl] = useState<string | null>(null);
+  const [avatarStatus, setAvatarStatus] = useState<"preparing" | "ready" | "fallback">("preparing");
+  const [canvasEpoch, setCanvasEpoch] = useState(0);
   /**
    * If the GLB hasn't loaded within AVATAR_LOAD_TIMEOUT_MS, stop waiting and show
    * PlaceholderAvatar. This handles blocked / slow CDNs (e.g. models.readyplayer.me
@@ -184,18 +310,39 @@ export function AvatarCanvas({ avatarUrl }: AvatarCanvasProps) {
   // 30 s — RPM GLBs can be 5–20 MB; 5 s was firing before the download finished.
   const AVATAR_LOAD_TIMEOUT_MS = 30_000;
   const [avatarTimedOut, setAvatarTimedOut] = useState(false);
+  const lastRecoveryAtRef = useRef(0);
+
+  useEffect(() => {
+    useAvatarStore.getState().setAvatarAssetInfo({
+      resolvedUrl: gltfUrl,
+      renderMode: !gltfUrl ? "loading" : avatarTimedOut || avatarStatus === "fallback" ? "fallback" : "loading",
+      loadError:
+        avatarTimedOut ? "Avatar GLB load timed out" : avatarStatus === "fallback" ? "Using placeholder avatar" : null,
+    });
+  }, [avatarStatus, avatarTimedOut, gltfUrl]);
 
   useEffect(() => {
     let cancelled = false;
-    let fromOverride = false;
+    let overrideUrl: string | null = null;
     try {
-      const o = window.localStorage.getItem("proxim.avatarOverrideUrl");
-      fromOverride = !!(o && o.trim());
+      const o = personaId ? window.localStorage.getItem(`proxim.avatarOverrideUrl:${personaId}`) : null;
+      overrideUrl = o?.trim() || null;
+      const isBundledPersonaAvatar = avatarUrl.startsWith("/avatars/") && !avatarUrl.includes("uploaded-avatar.glb");
+      const isLegacySharedUpload = !!overrideUrl && /\/avatars\/uploaded-avatar\.glb(?:$|\?)/.test(overrideUrl);
+      if (personaId && isBundledPersonaAvatar && isLegacySharedUpload) {
+        window.localStorage.removeItem(`proxim.avatarOverrideUrl:${personaId}`);
+        overrideUrl = null;
+      }
     } catch {
       /* ignore */
     }
-    const resolved = resolveAvatarUrl(avatarUrl);
-    const rpmCandidates = fromOverride ? null : buildRpmLoadCandidateUrls(avatarUrl);
+    const overrideResolved = overrideUrl ? resolveAvatarUrl(overrideUrl, personaId) : null;
+    const resolved = resolveAvatarUrl(avatarUrl, personaId);
+    const rpmCandidates = !overrideResolved ? buildRpmLoadCandidateUrls(avatarUrl) : null;
+    const localCandidates = buildLocalAvatarLoadCandidateUrls(avatarUrl);
+    const overrideCandidates = overrideResolved
+      ? buildLocalAvatarLoadCandidateUrls(overrideResolved) ?? [overrideResolved]
+      : null;
 
     const isSameOriginOrLocalApi = (u: string) => {
       if (u.startsWith("/__rpm/")) return true;
@@ -209,23 +356,38 @@ export function AvatarCanvas({ avatarUrl }: AvatarCanvasProps) {
       return false;
     };
 
-    if (!rpmCandidates?.length) {
+    const candidateUrls = [
+      ...(overrideCandidates ?? []),
+      ...(localCandidates ?? []),
+      ...(rpmCandidates ?? []),
+    ];
+
+    if (!candidateUrls.length) {
       setGltfUrl(resolved);
+      setAvatarStatus("ready");
       return () => {
         cancelled = true;
       };
     }
 
-    if (!isProxiedRpmAssetUrl(resolved) && !resolved.startsWith("/__rpm/")) {
+    const shouldProbe =
+      !!overrideCandidates?.length ||
+      !!localCandidates?.length ||
+      isProxiedRpmAssetUrl(resolved) ||
+      resolved.startsWith("/__rpm/");
+
+    if (!shouldProbe) {
       setGltfUrl(resolved);
+      setAvatarStatus("ready");
       return () => {
         cancelled = true;
       };
     }
 
     setGltfUrl(null);
+    setAvatarStatus("preparing");
     void (async () => {
-      for (const u of rpmCandidates) {
+      for (const u of candidateUrls) {
         if (cancelled) return;
         if (!isSameOriginOrLocalApi(u)) continue;
         try {
@@ -233,6 +395,7 @@ export function AvatarCanvas({ avatarUrl }: AvatarCanvasProps) {
           if (cancelled) return;
           if (r.ok) {
             setGltfUrl(u);
+            setAvatarStatus("ready");
             return;
           }
         } catch {
@@ -240,24 +403,66 @@ export function AvatarCanvas({ avatarUrl }: AvatarCanvasProps) {
         }
       }
       if (!cancelled) {
-        const preferApiOverBrokenVite =
-          rpmCandidates.length > 1 && rpmCandidates[0].startsWith("/__rpm/");
-        setGltfUrl((preferApiOverBrokenVite ? rpmCandidates[1] : rpmCandidates[0]) ?? resolved);
+        if (overrideCandidates?.length) {
+          try {
+            if (personaId) window.localStorage.removeItem(`proxim.avatarOverrideUrl:${personaId}`);
+          } catch {
+            /* ignore */
+          }
+        }
+        setGltfUrl(localCandidates?.[0] ?? rpmCandidates?.[0] ?? resolved);
+        setAvatarStatus("fallback");
       }
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [avatarUrl]);
+  }, [avatarUrl, personaId]);
 
   // Reset + start the per-URL load timeout whenever gltfUrl changes.
   useEffect(() => {
     if (!gltfUrl) return;
     setAvatarTimedOut(false);
-    const id = setTimeout(() => setAvatarTimedOut(true), AVATAR_LOAD_TIMEOUT_MS);
+    const id = setTimeout(() => {
+      setAvatarTimedOut(true);
+      const store = useAvatarStore.getState();
+      store.setAvatarAssetInfo({
+        resolvedUrl: gltfUrl,
+        loadError: "Avatar load timed out, retrying real GLB",
+        renderMode: "loading",
+      });
+      setCanvasEpoch((x) => x + 1);
+    }, AVATAR_LOAD_TIMEOUT_MS);
     return () => clearTimeout(id);
   }, [gltfUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!avatarTimedOut) return;
+    useAvatarStore.getState().setAvatarAssetInfo({
+      resolvedUrl: gltfUrl,
+      renderMode: "loading",
+      loadError: "Avatar GLB load timed out, retrying",
+    });
+  }, [avatarTimedOut, gltfUrl]);
+
+  const recoverCanvas = () => {
+    const now = Date.now();
+    if (now - lastRecoveryAtRef.current < 1200) return;
+    lastRecoveryAtRef.current = now;
+    setAvatarStatus("preparing");
+    setAvatarTimedOut(false);
+    const store = useAvatarStore.getState();
+    store.setAvatarAssetInfo({
+      resolvedUrl: gltfUrl,
+      loadError: "WebGL context lost, recovering canvas",
+      renderMode: "loading",
+      contextLossCount: store.avatarAsset.contextLossCount + 1,
+    });
+    window.setTimeout(() => {
+      setCanvasEpoch((x) => x + 1);
+    }, 120);
+  };
 
   const fallbackOverlay = (
     <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
@@ -281,36 +486,43 @@ export function AvatarCanvas({ avatarUrl }: AvatarCanvasProps) {
     >
       {!gltfUrl ? (
         <div className="flex h-full w-full items-center justify-center">
-          <p className="text-xs text-muted">Preparing avatar…</p>
+          <p className="text-xs text-muted">
+            {avatarStatus === "fallback" ? "Recovering avatar..." : "Preparing avatar..."}
+          </p>
         </div>
       ) : (
         <CanvasErrorBoundary fallback={fallbackOverlay}>
           <Canvas
-            key={gltfUrl}
+            key={`${gltfUrl}:${canvasEpoch}`}
             className="block h-full w-full touch-none"
             style={{ width: "100%", height: "100%", display: "block" }}
-            dpr={[1, 2]}
-            gl={{ alpha: true }}
-            camera={{ position: [0, 1.48, 0.82], fov: 32, near: 0.08, far: 80 }}
+            dpr={1}
+            gl={{
+              alpha: true,
+              antialias: false,
+              powerPreference: "low-power",
+              failIfMajorPerformanceCaveat: false,
+            }}
+            camera={{ position: [0, 1.68, 0.68], fov: 23, near: 0.08, far: 80 }}
             onCreated={({ camera }) => {
               camera.up.set(0, 1, 0);
-              camera.lookAt(0, 1.46, 0);
+              camera.lookAt(0, 1.62, 0.02);
             }}
           >
+            <WebglRecoveryBridge onContextLost={recoverCanvas} />
             <PinBustCamera />
             <ambientLight intensity={0.55} />
-            <directionalLight position={[2, 3, 2]} intensity={1.1} castShadow />
-            {/* PlaceholderAvatar is used as both Suspense fallback and timeout fallback so
-                the canvas is never black: it shows instantly while the GLB loads, and
-                permanently when the CDN is unreachable (models.readyplayer.me blocked). */}
-            <Suspense fallback={<PlaceholderAvatar />}>
-              {avatarTimedOut ? (
-                <PlaceholderAvatar />
-              ) : (
-                <AvatarModel url={gltfUrl} fallback={<PlaceholderAvatar />} />
-              )}
-              <ContactShadows opacity={0.45} scale={10} blur={2.4} far={4} position={[0, -1.42, 0]} />
-              <Environment preset="city" />
+            <directionalLight position={[2, 3, 2]} intensity={1.05} />
+            <Suspense
+              fallback={
+                <Html center>
+                  <div className="rounded-md border border-border bg-bg/80 px-3 py-2 text-xs text-muted">
+                    Loading avatar...
+                  </div>
+                </Html>
+              }
+            >
+              <AvatarModel url={gltfUrl} fallback={null} />
             </Suspense>
           </Canvas>
         </CanvasErrorBoundary>

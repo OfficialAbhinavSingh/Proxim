@@ -6,7 +6,7 @@ import type { Emotion, Message, Persona, WsClientMessage, WsServerMessage } from
 import { streamClaudeResponse, stripEmotionTag, generateScoreCard } from "../services/claudeService.js";
 import { synthesizeSentenceWithTimestamps } from "../services/elevenLabsService.js";
 import { synthesizeSentenceToWavWithGroq } from "../services/groqTtsService.js";
-import { bufferToBase64, makeSilenceWavForDuration, minimalSilenceWav, parseWavDurationSec, scaleVisemesToDuration } from "../services/audioService.js";
+import { alignVisemesToWavEnergy, bufferToBase64, makeSilenceWavForDuration, minimalSilenceWav, parseWavDurationSec, scaleVisemesToDuration } from "../services/audioService.js";
 import { synthesizeVisemesFromText } from "../services/visemeFallbackService.js";
 import { streamMuseTalkFrames } from "../services/museTalkService.js";
 
@@ -104,7 +104,7 @@ export function createWsHandler() {
     let audioMimeType: string = "audio/wav";
     let isSilence = false;
     let visemes = synthesizeVisemesFromText(sentence);
-    let visemeSource: "elevenlabs_alignment" | "fallback_text" | "fallback_static" = "fallback_text";
+    let visemeSource: "elevenlabs_alignment" | "fallback_audio" | "fallback_text" | "fallback_static" = "fallback_text";
 
     // Record tts_start on first sentence synthesis.
     if (latency.ttsStartMs === null) {
@@ -135,14 +135,16 @@ export function createWsHandler() {
         if (groqWav.length > 0) {
           wav = groqWav;
           const rawVisemes = synthesizeVisemesFromText(sentence);
-          // Scale text-derived visemes to match actual Groq audio duration for better lip sync.
+          // Retime to the real WAV duration first, then use the WAV energy envelope
+          // so mouth movement follows actual speech rhythm instead of text only.
           const audioDurationSec = parseWavDurationSec(groqWav);
-          visemes = audioDurationSec
+          const durationScaled = audioDurationSec
             ? scaleVisemesToDuration(rawVisemes, audioDurationSec)
             : rawVisemes;
-          visemeSource = "fallback_text";
+          visemes = alignVisemesToWavEnergy(groqWav, durationScaled);
+          visemeSource = "fallback_audio";
           console.log(
-            `[TTS] Groq Orpheus (voice=${groqVoice}): ${groqWav.length}B WAV, duration=${audioDurationSec?.toFixed(2) ?? "?"}s, visemes=${visemes.length}`
+            `[TTS] Groq audio-synced visemes (voice=${groqVoice}): ${groqWav.length}B WAV, duration=${audioDurationSec?.toFixed(2) ?? "?"}s, visemes=${visemes.length}`
           );
         }
       } catch (err2) {
@@ -369,7 +371,7 @@ export function createWsHandler() {
       const cap = {
         type: "capabilities" as const,
         sessionId: msg.sessionId,
-        alignment: { available: !!process.env.ELEVENLABS_API_KEY },
+        alignment: { available: !!process.env.ELEVENLABS_API_KEY || !!process.env.GROQ_API_KEY },
         tts: {
           elevenLabsConfigured: !!process.env.ELEVENLABS_API_KEY,
           groqConfigured: !!process.env.GROQ_API_KEY,

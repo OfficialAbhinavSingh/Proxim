@@ -10,8 +10,8 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 
 /**
  * Upload a local avatar GLB so the client can load it from localhost even when external CDNs are blocked.
  *
- * POST /assets/upload-avatar (multipart/form-data, field name: `file`)
- * -> { url: "/avatars/uploaded-avatar.glb" }
+ * POST /assets/upload-avatar (multipart/form-data, fields: `file`, optional `personaId`)
+ * -> { url: "/avatars/uploaded-avatar-<personaId>.glb" }
  */
 avatarProxyRouter.post("/upload-avatar", upload.single("file"), async (req, res) => {
   try {
@@ -30,7 +30,9 @@ avatarProxyRouter.post("/upload-avatar", upload.single("file"), async (req, res)
     // Repo layout: server/src/routes -> ../../.. -> repo root -> client/public/avatars
     const publicDir = join(process.cwd(), "..", "client", "public", "avatars");
     mkdirSync(publicDir, { recursive: true });
-    const filename = "uploaded-avatar.glb";
+    const personaId = typeof req.body?.personaId === "string" ? req.body.personaId : "";
+    const safePersonaId = personaId.replace(/[^a-z0-9_-]/gi, "").slice(0, 80);
+    const filename = safePersonaId ? `uploaded-avatar-${safePersonaId}.glb` : "uploaded-avatar.glb";
     const targetPath = join(publicDir, filename);
     writeFileSync(targetPath, file.buffer);
 

@@ -15,8 +15,8 @@ import { useSession } from "./hooks/useSession";
 import { useTheme } from "./hooks/useTheme";
 import { useVoiceInput } from "./hooks/useVoiceInput";
 import { useWebSocket } from "./hooks/useWebSocket";
-import { useSessionStore } from "./store/sessionStore";
 import { useAvatarStore } from "./store/avatarStore";
+import { useSessionStore } from "./store/sessionStore";
 import type { ScoreCard as ScoreCardType } from "./types";
 
 export default function App() {
@@ -34,6 +34,7 @@ export default function App() {
     completeAssistantTurn,
     assistantStreamingText,
     messages,
+    liveUserTranscript,
   } = useSession();
 
   const sidebarOpen = useSessionStore((s) => s.sidebarOpen);
@@ -42,6 +43,7 @@ export default function App() {
   const micError = useSessionStore((s) => s.micError);
   const audioUnlocked = useSessionStore((s) => s.audioUnlocked);
   const setAudioUnlocked = useSessionStore((s) => s.setAudioUnlocked);
+  const setLiveUserTranscript = useSessionStore((s) => s.setLiveUserTranscript);
   const capabilities = useSessionStore((s) => s.capabilities);
   const beginLatencyTurn = useSessionStore((s) => s.beginLatencyTurn);
   const markAudioLatencyIfNeeded = useSessionStore((s) => s.markAudioLatencyIfNeeded);
@@ -70,6 +72,7 @@ export default function App() {
   const handleUserText = useCallback(
     (text: string) => {
       if (!sessionId || !personaId || !text.trim()) return;
+      setLiveUserTranscript("");
       beginLatencyTurn();
       appendUserMessage(text.trim());
       send({
@@ -79,7 +82,7 @@ export default function App() {
         personaId,
       });
     },
-    [appendUserMessage, beginLatencyTurn, personaId, send, sessionId]
+    [appendUserMessage, beginLatencyTurn, personaId, send, sessionId, setLiveUserTranscript]
   );
 
   const { listening, partialTranscript, mode, startListening, stopListening, tapToSpeak } =
@@ -87,6 +90,7 @@ export default function App() {
       enabled: isSessionActive && audioUnlocked,
       avatarSpeaking,
       onUtterance: handleUserText,
+      onPartial: (text) => setLiveUserTranscript(text),
       onError: (m) => setMicError(m),
     });
 
@@ -101,16 +105,6 @@ export default function App() {
         receivedAt,
       });
 
-      // Start viseme timeline immediately for responsiveness (mouth moves right away),
-      // then `useAudioPlayback` will re-align `chunkStartedAt` to the real audio start.
-      if (chunk.visemes?.length) {
-        useAvatarStore.getState().setVisemeTrack(chunk.visemes, receivedAt, {
-          sentenceIndex: chunk.sentenceIndex,
-          isSilence: !!chunk.isSilence,
-          visemeSource: chunk.visemeSource ?? null,
-          receivedAt,
-        });
-      }
       markAudioLatencyIfNeeded();
       enqueue({
         audioBase64: chunk.audioBase64,
@@ -159,6 +153,7 @@ export default function App() {
     stopListening();
     disconnect();
     clearLatencyTurn();
+    setLiveUserTranscript("");
     endSession();
   };
 
@@ -253,7 +248,7 @@ export default function App() {
 
               <div className="relative">
                 <LatencyHud />
-                <AvatarCanvas key={personaId ?? "none"} avatarUrl={selectedPersona?.avatarUrl ?? ""} />
+                <AvatarCanvas key={personaId ?? "none"} avatarUrl={selectedPersona?.avatarUrl ?? ""} personaId={personaId} />
                 <SpeakingWaveform analyser={analyserNode} />
               </div>
 
@@ -323,6 +318,7 @@ export default function App() {
             onToggle={toggleSidebar}
             messages={messages}
             streamingAssistant={assistantStreamingText}
+            liveUserTranscript={liveUserTranscript}
           />
         ) : null}
       </main>
