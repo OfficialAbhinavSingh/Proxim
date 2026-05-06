@@ -20,6 +20,7 @@ export function useSession() {
   const clearAssistantStream = useSessionStore((s) => s.clearAssistantStream);
   const assistantStreamingText = useSessionStore((s) => s.assistantStreamingText);
   const currentEmotion = useSessionStore((s) => s.currentEmotion);
+  const liveUserTranscript = useSessionStore((s) => s.liveUserTranscript);
 
   const [elapsedSec, setElapsedSec] = useState(0);
 
@@ -88,5 +89,6 @@ export function useSession() {
     completeAssistantTurn,
     assistantStreamingText,
     currentEmotion,
+    liveUserTranscript,
   };
 }

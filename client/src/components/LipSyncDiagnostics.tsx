@@ -23,6 +23,7 @@ export function LipSyncDiagnostics() {
   const morphHost = useAvatarStore((s) => s.morphHost);
   const avatarAsset = useAvatarStore((s) => s.avatarAsset);
   const setVisemeTrack = useAvatarStore((s) => s.setVisemeTrack);
+  const personaId = useSessionStore((s) => s.personaId);
   const morphMissing = useMemo(() => {
     if (visemeMorphCount == null) return false;
     return visemeMorphCount <= 0;
@@ -62,6 +63,7 @@ export function LipSyncDiagnostics() {
     const serverBase = (import.meta.env.VITE_HTTP_SERVER_URL as string | undefined) ?? "http://localhost:3001";
     const form = new FormData();
     form.append("file", file, file.name);
+    if (personaId) form.append("personaId", personaId);
     const res = await fetch(`${serverBase.replace(/\/+$/, "")}/assets/upload-avatar`, {
       method: "POST",
       body: form,
@@ -73,7 +75,16 @@ export function LipSyncDiagnostics() {
     const json = (await res.json()) as { url?: string };
     if (!json.url) throw new Error("upload failed (no url)");
     // Persist override and reload so AvatarCanvas picks it up.
-    window.localStorage.setItem("proxim.avatarOverrideUrl", json.url);
+    if (personaId) {
+      window.localStorage.setItem(`proxim.avatarOverrideUrl:${personaId}`, json.url);
+    }
+    window.location.reload();
+  };
+
+  const clearAvatarOverride = () => {
+    if (personaId) {
+      window.localStorage.removeItem(`proxim.avatarOverrideUrl:${personaId}`);
+    }
     window.location.reload();
   };
 
@@ -155,6 +166,14 @@ export function LipSyncDiagnostics() {
             }}
           />
         </label>
+        <button
+          type="button"
+          onClick={clearAvatarOverride}
+          className="btn px-2.5 py-1 text-[11px]"
+          title="Clear any uploaded override and return to the persona's default avatar"
+        >
+          Reset avatar
+        </button>
         {morphMissing ? (
           <p className="text-muted">
             Note: the loaded GLB mesh doesn’t appear to expose Oculus `viseme_*` morph targets, so lips can’t be driven. Use a GLB exported with Oculus visemes (Ready Player Me with morphTargets, or a compatible asset).

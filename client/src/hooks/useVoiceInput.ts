@@ -1,23 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const SILENCE_MS_WEBSPEECH = 520;
-const PCM_SAMPLE_RATE = 16_000;        // Whisper's native rate
-const PCM_SPEECH_THRESHOLD = 0.0025;   // RMS — raised from 0.0008 to cut ambient/echo false-positives
-const PCM_PEAK_THRESHOLD = 0.035;      // Peak — raised from 0.015 for same reason
-const PCM_SILENCE_FRAMES = 15;         // ~610ms silence triggers auto-flush (was 12)
-const PCM_MIN_SPEECH_FRAMES = 5;       // require more sustained speech before flushing (was 2)
-const PCM_ROLLING_MAX_FRAMES = 250;    // rolling buffer cap ~32s
-const PCM_MAX_FRAMES = 230;            // ~30s hard limit per segment
+const PCM_SAMPLE_RATE = 16_000;
+const PCM_SPEECH_THRESHOLD = 0.0025;
+const PCM_PEAK_THRESHOLD = 0.035;
+const PCM_SILENCE_FRAMES = 15;
+const PCM_MIN_SPEECH_FRAMES = 5;
+const PCM_ROLLING_MAX_FRAMES = 250;
+const PCM_MAX_FRAMES = 230;
 const PCM_BUFFER_SIZE = 2048;
-const PCM_MANUAL_TAIL_FRAMES = 48;     // ~6s tail fallback for manual flush
-/** ms to keep mic muted after avatar finishes speaking — lets speaker echo die down. */
+const PCM_MANUAL_TAIL_FRAMES = 48;
 const POST_SPEAK_COOLDOWN_MS = 450;
 
 const DEBUG = true;
 const log = (...args: unknown[]) => { if (DEBUG) console.log("[voice]", ...args); };
 const logErr = (...args: unknown[]) => { if (DEBUG) console.error("[voice]", ...args); };
 
-/** Inline WAV encoder — avoids any dependency on vad-web / ONNX. */
 function encodeWav(samples: Float32Array, sampleRate: number): Blob {
   const buf = new ArrayBuffer(44 + samples.length * 2);
   const v = new DataView(buf);
@@ -27,8 +25,8 @@ function encodeWav(samples: Float32Array, sampleRate: number): Blob {
   s4(8, "WAVE");
   s4(12, "fmt ");
   v.setUint32(16, 16, true);
-  v.setUint16(20, 1, true);              // PCM
-  v.setUint16(22, 1, true);             // mono
+  v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true);
   v.setUint32(24, sampleRate, true);
   v.setUint32(28, sampleRate * 2, true);
   v.setUint16(32, 2, true);
@@ -37,20 +35,13 @@ function encodeWav(samples: Float32Array, sampleRate: number): Blob {
   v.setUint32(40, samples.length * 2, true);
   for (let i = 0; i < samples.length; i++) {
     const x = Math.max(-1, Math.min(1, samples[i]!));
-    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7FFF, true);
+    v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
   }
   return new Blob([buf], { type: "audio/wav" });
 }
 
 export interface UseVoiceInputOptions {
   enabled: boolean;
-  /**
-   * Set to true while the avatar is playing TTS audio.
-   * The PCM pipeline will discard captured frames and clear the buffer to prevent
-   * the avatar's voice from being fed back into Whisper (echo loop fix).
-   * A POST_SPEAK_COOLDOWN_MS delay is applied after avatarSpeaking goes false
-   * so any residual speaker echo dies down before recording resumes.
-   */
   avatarSpeaking?: boolean;
   onUtterance: (text: string) => void;
   onPartial?: (text: string) => void;
@@ -59,23 +50,27 @@ export interface UseVoiceInputOptions {
 
 type InputMode = "webspeech" | "server_stt" | "unsupported";
 
-export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, onPartial, onError }: UseVoiceInputOptions) {
+export function useVoiceInput({
+  enabled,
+  avatarSpeaking = false,
+  onUtterance,
+  onPartial,
+  onError,
+}: UseVoiceInputOptions) {
   const [listening, setListening] = useState(false);
   const [partialTranscript, setPartialTranscript] = useState("");
   const [mode, setMode] = useState<InputMode>("webspeech");
 
-  // Web Speech refs
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const partialRecognitionRef = useRef<SpeechRecognition | null>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTextRef = useRef("");
 
-  // PCM-WAV Whisper pipeline refs
   const pipelineActiveRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
 
-  // PCM segment state (lives inside the onaudioprocess closure; these refs allow flush from tapToSpeak)
   const pcmSamplesRef = useRef<Float32Array[]>([]);
   const pcmSpeakingRef = useRef(false);
   const pcmSilenceFramesRef = useRef(0);
@@ -86,27 +81,31 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
   const enabledRef = useRef(enabled);
   useEffect(() => { enabledRef.current = enabled; }, [enabled]);
 
-  /**
-   * Mic mute gate: true while the avatar is speaking OR during the post-speech
-   * cooldown. When muted, the onaudioprocess handler discards incoming frames
-   * and clears the rolling buffer so no avatar audio leaks into Whisper.
-   */
   const mutedRef = useRef(false);
   const cooldownTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const onUtteranceRef = useRef(onUtterance);
+  const onErrorRef = useRef(onError);
+  const onPartialRef = useRef(onPartial);
+
+  useEffect(() => {
+    onUtteranceRef.current = onUtterance;
+    onErrorRef.current = onError;
+    onPartialRef.current = onPartial;
+  }, [onUtterance, onError, onPartial]);
+
   useEffect(() => {
     if (avatarSpeaking) {
-      // Avatar started speaking — mute immediately and cancel any pending cooldown.
       if (cooldownTimerRef.current) { clearTimeout(cooldownTimerRef.current); cooldownTimerRef.current = null; }
       mutedRef.current = true;
-      // Wipe any audio accumulated before / during avatar speech to avoid contamination.
       pcmSamplesRef.current = [];
       pcmSpeakingRef.current = false;
       pcmSilenceFramesRef.current = 0;
       pcmSpeechFramesRef.current = 0;
+      lastTextRef.current = "";
+      onPartialRef.current?.("");
       setPartialTranscript("");
     } else {
-      // Avatar stopped speaking — stay muted for POST_SPEAK_COOLDOWN_MS so echo dies down.
       cooldownTimerRef.current = setTimeout(() => {
         mutedRef.current = false;
         cooldownTimerRef.current = null;
@@ -116,27 +115,80 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
     return () => {
       if (cooldownTimerRef.current) { clearTimeout(cooldownTimerRef.current); cooldownTimerRef.current = null; }
     };
-  }, [avatarSpeaking]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const onUtteranceRef = useRef(onUtterance);
-  const onErrorRef = useRef(onError);
-  const onPartialRef = useRef(onPartial);
-  useEffect(() => {
-    onUtteranceRef.current = onUtterance;
-    onErrorRef.current = onError;
-    onPartialRef.current = onPartial;
-  }, [onUtterance, onError, onPartial]);
+  }, [avatarSpeaking]);
 
   const reportError = useCallback((msg: string) => {
     logErr(msg);
     onErrorRef.current?.(msg);
   }, []);
 
-  // ── WAV Whisper pipeline ──────────────────────────────────────────────────
+  const getSpeechRecognitionCtor = useCallback(() => {
+    return (
+      (window as unknown as { SpeechRecognition?: typeof SpeechRecognition }).SpeechRecognition ||
+      (window as unknown as { webkitSpeechRecognition?: typeof SpeechRecognition }).webkitSpeechRecognition ||
+      null
+    );
+  }, []);
+
+  const clearSilenceTimer = useCallback(() => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  }, []);
+
+  const stopPartialWebSpeech = useCallback(() => {
+    try { partialRecognitionRef.current?.stop(); } catch { /* ignore */ }
+    partialRecognitionRef.current = null;
+  }, []);
+
+  const startPartialWebSpeech = useCallback(() => {
+    const SR = getSpeechRecognitionCtor();
+    if (!SR || partialRecognitionRef.current) return false;
+
+    const rec = new SR();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = "en-US";
+
+    rec.onresult = (ev: SpeechRecognitionEvent) => {
+      let interim = "";
+      let finalChunk = "";
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        const r = ev.results[i];
+        if (r.isFinal) finalChunk += r[0].transcript;
+        else interim += r[0].transcript;
+      }
+      const combined = (finalChunk + interim).trim();
+      if (!combined) return;
+      lastTextRef.current = combined;
+      setPartialTranscript(combined);
+      onPartialRef.current?.(combined);
+    };
+
+    rec.onerror = () => {
+      // Best-effort interim transcript only.
+    };
+
+    rec.onend = () => {
+      if (partialRecognitionRef.current === rec && pipelineActiveRef.current && enabledRef.current) {
+        try { rec.start(); } catch { /* ignore */ }
+      }
+    };
+
+    partialRecognitionRef.current = rec;
+    try {
+      rec.start();
+      return true;
+    } catch {
+      partialRecognitionRef.current = null;
+      return false;
+    }
+  }, [getSpeechRecognitionCtor]);
 
   const transcribeBlob = useCallback(async (blob: Blob, label = "") => {
     const api = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
-    log(`POST /session/transcribe (${blob.size}B${label ? " " + label : ""})`);
+    log(`POST /session/transcribe (${blob.size}B${label ? ` ${label}` : ""})`);
     try {
       const fd = new FormData();
       fd.append("audio", blob, "clip.wav");
@@ -149,7 +201,7 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
       if (data.error && !data.text) throw new Error(data.error);
       const text = (data.text ?? "").trim();
       if (text) {
-        log("whisper →", text);
+        log("whisper ->", text);
         onUtteranceRef.current(text);
       } else {
         log("whisper returned empty (noise/hallucination filtered)");
@@ -159,33 +211,35 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
     }
   }, [reportError]);
 
-  /** manualFlush=true skips the min-speech-frames guard (user explicitly pressed Send). */
   const flushPcmBuffer = useCallback(async (manualFlush = false) => {
     if (pcmFlushingRef.current) return;
     if (pcmSamplesRef.current.length === 0) {
       log("PCM flush: buffer empty, nothing to send");
       return;
     }
+
     const speechFrames = pcmSpeechFramesRef.current;
     if (!manualFlush && speechFrames < PCM_MIN_SPEECH_FRAMES) {
-      log(`PCM auto-flush skipped — ${speechFrames} speech frames < ${PCM_MIN_SPEECH_FRAMES} min`);
+      log(`PCM auto-flush skipped - ${speechFrames} speech frames < ${PCM_MIN_SPEECH_FRAMES} min`);
       pcmSamplesRef.current = [];
       pcmSpeakingRef.current = false;
       pcmSilenceFramesRef.current = 0;
       pcmSpeechFramesRef.current = 0;
       pcmTotalFramesRef.current = 0;
+      lastTextRef.current = "";
+      onPartialRef.current?.("");
       setPartialTranscript("");
       return;
     }
+
     pcmFlushingRef.current = true;
 
     let chunks = pcmSamplesRef.current;
     if (manualFlush && speechFrames < PCM_MIN_SPEECH_FRAMES && chunks.length > PCM_MANUAL_TAIL_FRAMES) {
-      // Manual "Send now" often includes a long rolling window. If VAD missed speech,
-      // only send the recent tail so Whisper doesn't get dominated by silence.
       chunks = chunks.slice(-PCM_MANUAL_TAIL_FRAMES);
       log(`PCM manual tail fallback: using last ${chunks.length} frames`);
     }
+
     pcmSamplesRef.current = [];
     pcmSpeakingRef.current = false;
     pcmSilenceFramesRef.current = 0;
@@ -196,11 +250,16 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
     log(`PCM flush (manual=${manualFlush}): ${chunks.length} frames, ${(total / PCM_SAMPLE_RATE).toFixed(2)}s audio`);
     const merged = new Float32Array(total);
     let off = 0;
-    for (const c of chunks) { merged.set(c, off); off += c.length; }
+    for (const c of chunks) {
+      merged.set(c, off);
+      off += c.length;
+    }
 
-    setPartialTranscript("…");
+    setPartialTranscript(lastTextRef.current.trim() || "...");
     const blob = encodeWav(merged, PCM_SAMPLE_RATE);
     await transcribeBlob(blob);
+    lastTextRef.current = "";
+    onPartialRef.current?.("");
     setPartialTranscript("");
     pcmFlushingRef.current = false;
   }, [transcribeBlob]);
@@ -223,13 +282,19 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
     pcmSpeechFramesRef.current = 0;
     pcmTotalFramesRef.current = 0;
     pcmFlushingRef.current = false;
+    lastTextRef.current = "";
+    onPartialRef.current?.("");
+    stopPartialWebSpeech();
     setListening(false);
     setPartialTranscript("");
-  }, []);
+  }, [stopPartialWebSpeech]);
 
   const startPcmWhisperPipeline = useCallback(async () => {
-    if (pipelineActiveRef.current) { log("PCM pipeline already active"); return; }
-    log("starting PCM WAV → Whisper pipeline");
+    if (pipelineActiveRef.current) {
+      log("PCM pipeline already active");
+      return;
+    }
+    log("starting PCM WAV -> Whisper pipeline");
     pipelineActiveRef.current = true;
     setMode("server_stt");
 
@@ -246,29 +311,29 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
         await audioCtx.resume().catch(() => {});
       }
       log(`AudioContext state=${audioCtx.state} sampleRate=${audioCtx.sampleRate}`);
+      void startPartialWebSpeech();
 
       const source = audioCtx.createMediaStreamSource(stream);
-      // ScriptProcessor is deprecated but still fully supported in all browsers
-      // and doesn't need a separate worklet URL file.
       const processor = audioCtx.createScriptProcessor(PCM_BUFFER_SIZE, 1, 1);
       processorRef.current = processor;
 
       processor.onaudioprocess = (ev) => {
         if (!pipelineActiveRef.current || !enabledRef.current || pcmFlushingRef.current) return;
 
-        // Drop all frames while avatar is speaking (or during echo-tail cooldown).
         if (mutedRef.current) {
           pcmSamplesRef.current = [];
           pcmSpeakingRef.current = false;
           pcmSilenceFramesRef.current = 0;
           pcmSpeechFramesRef.current = 0;
+          lastTextRef.current = "";
+          onPartialRef.current?.("");
+          setPartialTranscript("");
           return;
         }
 
         const input = ev.inputBuffer.getChannelData(0);
         pcmTotalFramesRef.current += 1;
 
-        // RMS + peak energy (peak catches quiet but sharp consonants)
         let sum = 0;
         let peak = 0;
         for (let i = 0; i < input.length; i++) {
@@ -279,9 +344,7 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
         }
         const rms = Math.sqrt(sum / input.length);
 
-        // Always accumulate into rolling buffer (so Send now always has audio)
         pcmSamplesRef.current.push(new Float32Array(input));
-        // Cap rolling buffer to avoid unbounded memory
         if (pcmSamplesRef.current.length > PCM_ROLLING_MAX_FRAMES) {
           pcmSamplesRef.current.shift();
         }
@@ -293,8 +356,10 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
           pcmSpeakingRef.current = true;
           pcmSilenceFramesRef.current = 0;
           pcmSpeechFramesRef.current += 1;
-          setPartialTranscript("(speaking…)");
-          onPartialRef.current?.("(speaking…)");
+          if (!lastTextRef.current.trim()) {
+            setPartialTranscript("Listening...");
+            onPartialRef.current?.("Listening...");
+          }
         } else if (pcmSpeakingRef.current) {
           pcmSilenceFramesRef.current += 1;
           if (pcmSilenceFramesRef.current >= PCM_SILENCE_FRAMES) {
@@ -303,7 +368,6 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
           }
         }
 
-        // Hard max limit
         if (pcmTotalFramesRef.current >= PCM_MAX_FRAMES) {
           log("PCM max frames reached, flushing");
           void flushPcmBuffer(false);
@@ -312,7 +376,6 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
 
       source.connect(processor);
       processor.connect(audioCtx.destination);
-
       setListening(true);
     } catch (e) {
       pipelineActiveRef.current = false;
@@ -320,24 +383,19 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
       setListening(false);
       setMode("unsupported");
     }
-  }, [flushPcmBuffer, reportError]);
-
-  // ── Web Speech API ────────────────────────────────────────────────────────
-
-  const clearSilenceTimer = useCallback(() => {
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
-    }
-  }, []);
+  }, [flushPcmBuffer, reportError, startPartialWebSpeech]);
 
   const scheduleUtteranceEnd = useCallback((text: string) => {
     clearSilenceTimer();
     lastTextRef.current = text;
     silenceTimerRef.current = setTimeout(() => {
       const t = lastTextRef.current.trim();
-      if (t) { log("webspeech utterance →", t); onUtteranceRef.current(t); }
+      if (t) {
+        log("webspeech utterance ->", t);
+        onUtteranceRef.current(t);
+      }
       lastTextRef.current = "";
+      onPartialRef.current?.("");
       setPartialTranscript("");
       silenceTimerRef.current = null;
     }, SILENCE_MS_WEBSPEECH);
@@ -347,14 +405,17 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
     clearSilenceTimer();
     try { recognitionRef.current?.stop(); } catch { /* ignore */ }
     recognitionRef.current = null;
+    lastTextRef.current = "";
+    onPartialRef.current?.("");
     setPartialTranscript("");
   }, [clearSilenceTimer]);
 
   const startWebSpeech = useCallback((): boolean => {
-    const SR =
-      (window as unknown as { SpeechRecognition?: typeof SpeechRecognition }).SpeechRecognition ||
-      (window as unknown as { webkitSpeechRecognition?: typeof SpeechRecognition }).webkitSpeechRecognition;
-    if (!SR) { log("Web Speech API not available"); return false; }
+    const SR = getSpeechRecognitionCtor();
+    if (!SR) {
+      log("Web Speech API not available");
+      return false;
+    }
     if (recognitionRef.current) return true;
 
     log("starting Web Speech API");
@@ -385,13 +446,11 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
       if (ev.error === "not-allowed" || ev.error === "service-not-allowed") {
         reportError("Microphone permission denied.");
       } else if (ev.error === "network") {
-        // Google speech servers unreachable — fall back to PCM-WAV Whisper
         recognitionRef.current = null;
         try { rec.stop(); } catch { /* ignore */ }
-        reportError("Web Speech unavailable (network). Switching to Whisper…");
+        reportError("Web Speech unavailable (network). Switching to Whisper...");
         void startPcmWhisperPipeline();
       }
-      // "no-speech" and "aborted" are non-fatal; onend will restart
     };
 
     rec.onend = () => {
@@ -409,9 +468,7 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
       reportError(e instanceof Error ? e.message : "Could not start speech recognition");
       return false;
     }
-  }, [reportError, scheduleUtteranceEnd, startPcmWhisperPipeline]);
-
-  // ── Public API ────────────────────────────────────────────────────────────
+  }, [getSpeechRecognitionCtor, reportError, scheduleUtteranceEnd, startPcmWhisperPipeline]);
 
   const stopListening = useCallback(() => {
     log("stopListening");
@@ -435,7 +492,6 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
       log("tapToSpeak: manual flush (bypasses speech-frame guard)");
       void flushPcmBuffer(true);
     }
-    // webspeech is hands-free; tap does nothing
   }, [flushPcmBuffer, mode]);
 
   useEffect(() => {
@@ -456,8 +512,6 @@ export function useVoiceInput({ enabled, avatarSpeaking = false, onUtterance, on
 
   return { listening, partialTranscript, mode, startListening, stopListening, tapToSpeak };
 }
-
-// ── Minimal browser type stubs ────────────────────────────────────────────
 
 interface SpeechRecognition extends EventTarget {
   continuous: boolean;

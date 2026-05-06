@@ -65,6 +65,7 @@ export interface ScoreCard {
 
 export type VisemeSource =
   | "elevenlabs_alignment"
+  | "fallback_audio"
   | "fallback_text"
   | "fallback_static";
 

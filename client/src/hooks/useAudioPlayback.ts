@@ -1,6 +1,8 @@
 import { useCallback, useRef, useState } from "react";
 import { useAvatarStore } from "../store/avatarStore";
-import type { VisemeKeyframe, VisemeSource } from "../types";
+import { useSessionStore } from "../store/sessionStore";
+import personasJson from "../config/personas.json";
+import type { Persona, VisemeKeyframe, VisemeSource } from "../types";
 
 type QueueItem = {
   audioBase64: string;
@@ -17,6 +19,46 @@ type QueueItem = {
   receivedAt?: number;
 };
 
+type VoiceProfile = {
+  gender: "female" | "male";
+  patterns: RegExp[];
+  avoid: RegExp[];
+  rate: number;
+  pitch: number;
+};
+
+const FEMALE_VOICE_PATTERNS = [
+  /zira/i,
+  /samantha/i,
+  /karen/i,
+  /susan/i,
+  /moira/i,
+  /tessa/i,
+  /ava/i,
+  /victoria/i,
+  /serena/i,
+  /female/i,
+];
+const MALE_VOICE_PATTERNS = [/david/i, /mark/i, /daniel/i, /alex/i, /\bmale\b/i, /google uk english male/i];
+const FEMALE_AVOID_PATTERNS = [/david/i, /mark/i, /daniel/i, /jorge/i, /\bmale\b/i];
+const MALE_AVOID_PATTERNS = [/zira/i, /samantha/i, /karen/i, /susan/i, /moira/i, /tessa/i, /female/i];
+
+function pickVoice(voices: SpeechSynthesisVoice[], profile: VoiceProfile): SpeechSynthesisVoice | undefined {
+  const englishVoices = voices.filter((v) => v.lang.toLowerCase().startsWith("en"));
+  const scored = englishVoices
+    .map((voice) => {
+      const name = voice.name;
+      const preferredScore = profile.patterns.reduce((score, pattern) => score + (pattern.test(name) ? 3 : 0), 0);
+      const avoidScore = profile.avoid.reduce((score, pattern) => score + (pattern.test(name) ? 10 : 0), 0);
+      const localScore = voice.localService ? 1 : 0;
+      return { voice, score: preferredScore + localScore - avoidScore };
+    })
+    .sort((a, b) => b.score - a.score);
+
+  const best = scored[0];
+  return best && best.score > -5 ? best.voice : englishVoices[0];
+}
+
 /**
  * Decodes base64 audio and plays through Web Audio API.
  * When the server sends silence (both TTS providers unavailable), uses the
@@ -24,6 +66,9 @@ type QueueItem = {
  * Schedules viseme track start aligned with playback start.
  */
 export function useAudioPlayback(onLastChunkEnded?: () => void) {
+  const personaId = useSessionStore((s) => s.personaId);
+  const personas = personasJson as Persona[];
+  const selectedPersona = personas.find((p) => p.id === personaId) ?? null;
   const ctxRef = useRef<AudioContext | null>(null);
   /** TTS passes through here so we can visualize levels without changing loudness. */
   const masterGainRef = useRef<GainNode | null>(null);
@@ -70,17 +115,57 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
       const utterance = new SpeechSynthesisUtterance(text.trim());
       utteranceRef.current = utterance;
 
-      // Try to pick a natural-sounding female voice.
       const voices = window.speechSynthesis.getVoices();
-      const preferred = voices.find(
-        (v) =>
-          v.lang.startsWith("en") &&
-          /female|woman|girl|samantha|zira|susan|karen|moira|tessa/i.test(v.name)
-      );
+      const profiles: Record<string, VoiceProfile> = {
+        dr_chen_oncologist: {
+          gender: "female",
+          patterns: [/zira/i, /moira/i, /tessa/i, /ava/i, /serena/i, /female/i],
+          avoid: FEMALE_AVOID_PATTERNS,
+          rate: 0.9,
+          pitch: 0.98,
+        },
+        dr_patel_cardiologist: {
+          gender: "male",
+          patterns: [/david/i, /mark/i, /alex/i, /\bmale\b/i, /google uk english male/i],
+          avoid: MALE_AVOID_PATTERNS,
+          rate: 0.98,
+          pitch: 0.9,
+        },
+        dr_williams_gp: {
+          gender: "female",
+          patterns: [/samantha/i, /karen/i, /susan/i, /victoria/i, /zira/i, /female/i],
+          avoid: FEMALE_AVOID_PATTERNS,
+          rate: 0.93,
+          pitch: 1.12,
+        },
+        dr_kim_rheumatologist: {
+          gender: "female",
+          patterns: [/tessa/i, /zira/i, /moira/i, /ava/i, /female/i],
+          avoid: FEMALE_AVOID_PATTERNS,
+          rate: 0.88,
+          pitch: 1.06,
+        },
+        dr_rodriguez_hospitalist: {
+          gender: "male",
+          patterns: [/daniel/i, /jorge/i, /alex/i, /\bmale\b/i, /google us english/i],
+          avoid: MALE_AVOID_PATTERNS,
+          rate: 1.0,
+          pitch: 0.94,
+        },
+      };
+      const fallbackGender = selectedPersona?.gender === "male" ? "male" : "female";
+      const profile = (selectedPersona && profiles[selectedPersona.id]) ?? {
+        gender: fallbackGender,
+        patterns: fallbackGender === "male" ? MALE_VOICE_PATTERNS : FEMALE_VOICE_PATTERNS,
+        avoid: fallbackGender === "male" ? MALE_AVOID_PATTERNS : FEMALE_AVOID_PATTERNS,
+        rate: fallbackGender === "male" ? 0.97 : 0.93,
+        pitch: fallbackGender === "male" ? 0.92 : 1.07,
+      };
+      const preferred = pickVoice(voices, profile);
       if (preferred) utterance.voice = preferred;
 
-      utterance.rate = 0.92;
-      utterance.pitch = 1.05;
+      utterance.rate = profile.rate;
+      utterance.pitch = profile.pitch;
       utterance.volume = 1.0;
 
       utterance.onstart = () => onStart?.();
@@ -139,8 +224,12 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
             visemeSource: next.visemeSource ?? null,
             receivedAt: next.receivedAt ?? null,
           };
-          // If the track was already started on receive, only update start time to sync with audio.
-          if (st.visemes?.length) st.setChunkStartedAt(perfStart, meta);
+          const isSameChunk =
+            st.lastChunk.sentenceIndex === next.sentenceIndex &&
+            st.lastChunk.receivedAt === next.receivedAt &&
+            st.visemes.length > 0;
+          // Reuse only when we are re-syncing the exact same chunk to actual playback.
+          if (isSameChunk) st.setChunkStartedAt(perfStart, meta);
           else st.setVisemeTrack(next.visemes, perfStart, meta);
           src.start(when);
         });

@@ -5,9 +5,16 @@ interface TranscriptProps {
   onToggle: () => void;
   messages: Message[];
   streamingAssistant: string;
+  liveUserTranscript?: string;
 }
 
-export function Transcript({ open, onToggle, messages, streamingAssistant }: TranscriptProps) {
+export function Transcript({
+  open,
+  onToggle,
+  messages,
+  streamingAssistant,
+  liveUserTranscript,
+}: TranscriptProps) {
   return (
     <aside
       className={[
@@ -59,8 +66,18 @@ export function Transcript({ open, onToggle, messages, streamingAssistant }: Tra
             </div>
           </div>
         ) : null}
+        {liveUserTranscript?.trim() ? (
+          <div className="text-right">
+            <div
+              className="inline-block max-w-[95%] rounded-2xl border border-border px-3 py-2 italic"
+              style={{ background: "linear-gradient(115deg, rgb(var(--c-accent) / 0.16), rgb(var(--c-accent2) / 0.10))" }}
+            >
+              <p className="kicker">You · speaking</p>
+              <p className="mt-1 whitespace-pre-wrap">{liveUserTranscript}</p>
+            </div>
+          </div>
+        ) : null}
       </div>
     </aside>
   );
 }
-
