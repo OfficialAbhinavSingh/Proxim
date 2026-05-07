@@ -2,13 +2,14 @@ import { useCallback, useRef, useState } from "react";
 import { useAvatarStore } from "../store/avatarStore";
 import { useSessionStore } from "../store/sessionStore";
 import personasJson from "../config/personas.json";
-import type { Persona, VisemeKeyframe, VisemeSource } from "../types";
+import type { Emotion, Persona, VisemeKeyframe, VisemeSource } from "../types";
 
 type QueueItem = {
   audioBase64: string;
   audioMimeType: string;
   visemes: VisemeKeyframe[];
   visemeSource?: VisemeSource;
+  emotion?: Emotion;
   isLast: boolean;
   sentenceIndex: number;
   /** Sentence text for Web Speech Synthesis fallback when TTS audio is silent */
@@ -26,6 +27,36 @@ type VoiceProfile = {
   rate: number;
   pitch: number;
 };
+
+function prosodyForEmotion(profile: VoiceProfile, emotion: Emotion | undefined) {
+  switch (emotion) {
+    case "concerned":
+      return { rate: profile.rate * 0.9, pitch: profile.pitch * 0.94, volume: 0.96 };
+    case "skeptical":
+      return { rate: profile.rate * 0.95, pitch: profile.pitch * 0.9, volume: 0.98 };
+    case "positive":
+      return { rate: profile.rate * 1.06, pitch: profile.pitch * 1.08, volume: 1 };
+    case "engaged":
+      return { rate: profile.rate * 1.02, pitch: profile.pitch * 1.04, volume: 1 };
+    default:
+      return { rate: profile.rate, pitch: profile.pitch, volume: 1 };
+  }
+}
+
+function shapeFallbackSpeechText(text: string, emotion: Emotion | undefined) {
+  const trimmed = text.trim();
+  if (!trimmed) return trimmed;
+  switch (emotion) {
+    case "concerned":
+      return trimmed.replace(/\. /g, "... ");
+    case "positive":
+      return trimmed.replace(/\.$/, "!");
+    case "skeptical":
+      return trimmed.replace(/!+/g, ".");
+    default:
+      return trimmed;
+  }
+}
 
 const FEMALE_VOICE_PATTERNS = [
   /zira/i,
@@ -103,7 +134,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
    * Speak text via Web Speech Synthesis (browser-native, free, works offline).
    * Returns a Promise that resolves when speaking ends.
    */
-  function speakWithWebSpeech(text: string, onStart?: () => void): Promise<void> {
+  function speakWithWebSpeech(text: string, emotion?: Emotion, onStart?: () => void): Promise<void> {
     return new Promise((resolve) => {
       if (!("speechSynthesis" in window) || !text.trim()) {
         resolve();
@@ -112,7 +143,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
       // Cancel any ongoing utterance first.
       window.speechSynthesis.cancel();
 
-      const utterance = new SpeechSynthesisUtterance(text.trim());
+      const utterance = new SpeechSynthesisUtterance(shapeFallbackSpeechText(text, emotion));
       utteranceRef.current = utterance;
 
       const voices = window.speechSynthesis.getVoices();
@@ -164,9 +195,10 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
       const preferred = pickVoice(voices, profile);
       if (preferred) utterance.voice = preferred;
 
-      utterance.rate = profile.rate;
-      utterance.pitch = profile.pitch;
-      utterance.volume = 1.0;
+      const prosody = prosodyForEmotion(profile, emotion);
+      utterance.rate = prosody.rate;
+      utterance.pitch = prosody.pitch;
+      utterance.volume = prosody.volume;
 
       utterance.onstart = () => onStart?.();
       utterance.onend = () => resolve();
@@ -188,7 +220,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
         // ── Silence fallback path ──
         // Use Web Speech Synthesis for voice + let viseme track run for the
         // natural speech duration (Web Speech handles its own timing).
-        await speakWithWebSpeech(next.text, () => {
+        await speakWithWebSpeech(next.text, next.emotion, () => {
           useAvatarStore.getState().setVisemeTrack(next.visemes, performance.now(), {
             sentenceIndex: next.sentenceIndex,
             isSilence: !!next.isSilence,
@@ -213,8 +245,8 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
           src.buffer = buffer;
           src.connect(out);
           src.onended = () => resolve();
-          // Schedule slightly ahead to reduce jitter and align visemes to playback start.
-          const leadSec = 0.005;
+          // One render frame of lead time keeps lip motion visibly aligned while staying well under 300ms.
+          const leadSec = 0.016;
           const when = ctx.currentTime + leadSec;
           const perfStart = performance.now() + leadSec * 1000;
           const st = useAvatarStore.getState();
@@ -238,7 +270,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
       // If Web Audio decoding fails, also try Web Speech as last resort.
       if (next.text?.trim()) {
         try {
-          await speakWithWebSpeech(next.text, () => {
+          await speakWithWebSpeech(next.text, next.emotion, () => {
             useAvatarStore.getState().setVisemeTrack(next.visemes, performance.now(), {
               sentenceIndex: next.sentenceIndex,
               isSilence: !!next.isSilence,

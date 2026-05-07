@@ -1,5 +1,6 @@
 import Groq from "groq-sdk";
 import { Buffer } from "node:buffer";
+import type { Emotion } from "../types/index.js";
 
 /**
  * Valid Orpheus v1 English voices from Canopy Labs on Groq.
@@ -33,6 +34,29 @@ function resolvePlayAIVoice(orpheusVoice: string): string {
 function isTermsError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   return msg.includes("model_terms_required") || msg.includes("terms");
+}
+
+function shapeTextForEmotion(text: string, emotion: Emotion | undefined): string {
+  const trimmed = text.trim();
+  if (!trimmed) return trimmed;
+  switch (emotion) {
+    case "concerned":
+      return trimmed
+        .replace(/\. /g, "... ")
+        .replace(/\bI want\b/gi, "I really want")
+        .replace(/\bconcern\b/gi, "real concern");
+    case "skeptical":
+      return trimmed
+        .replace(/\bI think\b/gi, "I'm not convinced")
+        .replace(/\bCan you\b/gi, "Can you clearly")
+        .replace(/!+/g, ".");
+    case "positive":
+      return trimmed.replace(/\.$/, "!").replace(/\bThat is\b/gi, "That's genuinely");
+    case "engaged":
+      return trimmed.replace(/\bTell me\b/gi, "Tell me a bit more").replace(/\?$/, "?");
+    default:
+      return trimmed;
+  }
 }
 
 async function tryOrpheusTts(
@@ -78,16 +102,18 @@ async function tryPlayAITts(
 export async function synthesizeSentenceToWavWithGroq(
   apiKey: string | undefined,
   voice: string,
-  text: string
+  text: string,
+  emotion?: Emotion
 ): Promise<Buffer> {
   if (!apiKey) return Buffer.alloc(0);
   if (!text.trim()) return Buffer.alloc(0);
 
   const client = new Groq({ apiKey });
+  const spokenText = shapeTextForEmotion(text, emotion);
 
   // Try Orpheus first.
   try {
-    const buf = await tryOrpheusTts(client, voice, text);
+    const buf = await tryOrpheusTts(client, voice, spokenText);
     if (buf.length > 0) {
       console.log(`[TTS] Groq Orpheus (voice=${resolveOrpheusVoice(voice)}): ${buf.length}B WAV`);
       return buf;
@@ -106,7 +132,7 @@ export async function synthesizeSentenceToWavWithGroq(
   // Fallback: PlayAI TTS (no terms needed).
   try {
     const playAIVoice = resolvePlayAIVoice(resolveOrpheusVoice(voice));
-    const buf = await tryPlayAITts(client, voice, text);
+    const buf = await tryPlayAITts(client, voice, spokenText);
     if (buf.length > 0) {
       console.log(`[TTS] Groq PlayAI (voice=${playAIVoice}): ${buf.length}B WAV`);
       return buf;

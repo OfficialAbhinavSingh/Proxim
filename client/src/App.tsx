@@ -3,6 +3,7 @@ import { AvatarCanvas } from "./components/AvatarCanvas";
 import { LatencyHud } from "./components/LatencyHud";
 import { SpeakingWaveform } from "./components/SpeakingWaveform";
 import { PersonaSelector } from "./components/PersonaSelector";
+import { PatientRequestPanel } from "./components/PatientRequestPanel";
 import { SessionControls } from "./components/SessionControls";
 import { Transcript } from "./components/Transcript";
 import { TextQuestionInput } from "./components/TextQuestionInput";
@@ -34,6 +35,8 @@ export default function App() {
     completeAssistantTurn,
     assistantStreamingText,
     messages,
+    patientRequest,
+    setPatientRequest,
     liveUserTranscript,
   } = useSession();
 
@@ -80,9 +83,10 @@ export default function App() {
         text: text.trim(),
         sessionId,
         personaId,
+        patientRequest,
       });
     },
-    [appendUserMessage, beginLatencyTurn, personaId, send, sessionId, setLiveUserTranscript]
+    [appendUserMessage, beginLatencyTurn, patientRequest, personaId, send, sessionId, setLiveUserTranscript]
   );
 
   const { listening, partialTranscript, mode, startListening, stopListening, tapToSpeak } =
@@ -111,6 +115,7 @@ export default function App() {
         audioMimeType: chunk.audioMimeType,
         visemes: chunk.visemes,
         visemeSource: chunk.visemeSource,
+        emotion: chunk.emotion,
         isLast: chunk.isLast,
         sentenceIndex: chunk.sentenceIndex,
         text: chunk.text,
@@ -130,7 +135,12 @@ export default function App() {
     const pid = useSessionStore.getState().personaId;
     const active = useSessionStore.getState().isSessionActive;
     if (connected && !prevWsConnected.current && active && sid && pid) {
-      send({ type: "session_start", sessionId: sid, personaId: pid });
+      send({
+        type: "session_start",
+        sessionId: sid,
+        personaId: pid,
+        patientRequest: useSessionStore.getState().patientRequest,
+      });
     }
     prevWsConnected.current = connected;
   }, [connected, send]);
@@ -204,6 +214,11 @@ export default function App() {
                 onSelect={setPersonaId}
                 disabled={false}
               />
+              <PatientRequestPanel
+                value={patientRequest}
+                onChange={setPatientRequest}
+                disabled={false}
+              />
             </>
           ) : (
             <>
@@ -260,6 +275,12 @@ export default function App() {
                   void ensureCtx();
                   void tapToSpeak();
                 }}
+              />
+
+              <PatientRequestPanel
+                value={patientRequest}
+                onChange={setPatientRequest}
+                disabled={false}
               />
 
               <TextQuestionInput onSend={handleUserText} disabled={!connected} />

@@ -36,9 +36,9 @@ export function VoiceInput({
 
         <span className="kicker">
           {isWebSpeech
-            ? "MODE: Hands-free · speak and pause to send"
+            ? "MODE: Hands-free · fast final speech send"
             : isServerStt
-              ? "MODE: PCM WAV → Whisper · pause ~0.9s or press Send"
+              ? "MODE: Fast speech capture · ~0.2s pause or press Send"
               : `MODE: ${mode}`}
         </span>
 
@@ -63,8 +63,8 @@ export function VoiceInput({
         ) : (
           <span className="text-muted">
             {isWebSpeech
-              ? "Speak naturally — transcript appears after a short pause…"
-              : "Speak, then pause or press Send now…"}
+              ? "Speak naturally — final phrases send quickly..."
+              : "Speak, then briefly pause or press Send now..."}
           </span>
         )}
       </p>

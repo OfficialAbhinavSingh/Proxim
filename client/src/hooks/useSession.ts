@@ -10,6 +10,8 @@ export function useSession() {
   const isSessionActive = useSessionStore((s) => s.isSessionActive);
   const startedAt = useSessionStore((s) => s.startedAt);
   const messages = useSessionStore((s) => s.messages);
+  const patientRequest = useSessionStore((s) => s.patientRequest);
+  const setPatientRequest = useSessionStore((s) => s.setPatientRequest);
   const setSessionId = useSessionStore((s) => s.setSessionId);
   const setPersonaId = useSessionStore((s) => s.setPersonaId);
   const setSessionActive = useSessionStore((s) => s.setSessionActive);
@@ -81,6 +83,8 @@ export function useSession() {
     isSessionActive,
     startedAt,
     messages,
+    patientRequest,
+    setPatientRequest,
     elapsedSec,
     startSession,
     endSession,

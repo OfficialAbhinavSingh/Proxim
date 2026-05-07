@@ -327,9 +327,9 @@ export function AvatarCanvas({ avatarUrl, personaId }: AvatarCanvasProps) {
     try {
       const o = personaId ? window.localStorage.getItem(`proxim.avatarOverrideUrl:${personaId}`) : null;
       overrideUrl = o?.trim() || null;
-      const isBundledPersonaAvatar = avatarUrl.startsWith("/avatars/") && !avatarUrl.includes("uploaded-avatar.glb");
-      const isLegacySharedUpload = !!overrideUrl && /\/avatars\/uploaded-avatar\.glb(?:$|\?)/.test(overrideUrl);
-      if (personaId && isBundledPersonaAvatar && isLegacySharedUpload) {
+      const isBundledPersonaAvatar = avatarUrl.startsWith("/avatars/") && !/uploaded-avatar(?:-|\.glb)/.test(avatarUrl);
+      const isUploadedOverride = !!overrideUrl && /\/avatars\/uploaded-avatar(?:-[^/?]+)?\.glb(?:$|\?)/.test(overrideUrl);
+      if (personaId && isBundledPersonaAvatar && isUploadedOverride) {
         window.localStorage.removeItem(`proxim.avatarOverrideUrl:${personaId}`);
         overrideUrl = null;
       }

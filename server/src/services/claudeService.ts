@@ -15,7 +15,7 @@ import type { Emotion, Message, Persona } from "../types/index.js";
 const CLAUDE_MODEL = "claude-sonnet-4-20250514";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
 
-function buildSystemPrompt(persona: Persona): string {
+function buildSystemPrompt(persona: Persona, patientRequest?: string): string {
   const complianceClause = persona.complianceMode
     ? `\n\nCOMPLIANCE GUARDRAIL: If the sales representative makes any off-label claim, cites unapproved data, or promotes a product outside its approved indication, respond with appropriate physician skepticism (e.g., "I'm not aware of that being an approved use — can you share the label details?"). Note the compliance concern naturally in your response.`
     : "";
@@ -23,6 +23,9 @@ function buildSystemPrompt(persona: Persona): string {
   const baseline = persona.moodBaseline ?? persona.mood;
   const genderClause = persona.gender
     ? `\nIn this simulation you are a ${persona.gender === "male" ? "male" : "female"} physician (match tone and lived experience accordingly).`
+    : "";
+  const patientContext = patientRequest?.trim()
+    ? `\n\nPATIENT SITUATION TO REACT TO:\n${patientRequest.trim()}\n\nUse this patient situation as active context. Let it influence your emotional tag and body-language tone:\n- Use [CONCERNED] when the patient issue involves safety, anxiety, adherence barriers, caregiver worry, frailty, cost distress, or unresolved risk.\n- Use [SKEPTICAL] when the representative's answer glosses over the patient concern, overclaims, or lacks evidence.\n- Use [ENGAGED] when you are exploring the patient's needs or asking practical follow-up questions.\n- Use [POSITIVE] only when the representative gives a credible, patient-centered answer.\nRespond like a real physician thinking about this specific patient, not like an AI assistant summarizing. Speak in first person, use natural clinical phrasing, and include brief empathy where appropriate.`
     : "";
   return `You are ${persona.name}, a ${persona.specialty} at ${persona.hospital}.
 Personality: ${persona.personality}
@@ -36,7 +39,9 @@ Do not explain the tag. Choose the emotion an HCP would naturally feel at this m
 
 For compatibility you may instead use the legacy form on its own line:
 [EMOTION:neutral] through [EMOTION:positive] plus [EMOTION:concerned]
-The system strips tags before text-to-speech.${complianceClause}`;
+The system strips tags before text-to-speech.
+
+STYLE: Do not sound like a generic AI assistant. Avoid phrases like "as an AI", "here is a summary", "it is important to note", or bullet-point lecture style. Answer as a busy clinician in a live conversation, with human hesitation, warmth, doubt, or pressure when the situation calls for it.${patientContext}${complianceClause}`;
 }
 
 /** Preferred: [NEUTRAL]\\nAnswer… */
@@ -63,10 +68,11 @@ export function stripEmotionTag(raw: string): { emotion: Emotion; displayText: s
 async function* streamGroqResponse(
   apiKey: string,
   persona: Persona,
-  history: Message[]
+  history: Message[],
+  patientRequest?: string
 ): AsyncGenerator<{ textDelta: string }> {
   const client = new Groq({ apiKey });
-  const system = `${buildSystemPrompt(persona)}\n\nAdditional persona notes:\n${persona.systemPrompt}`;
+  const system = `${buildSystemPrompt(persona, patientRequest)}\n\nAdditional persona notes:\n${persona.systemPrompt}`;
 
   const messages = [
     { role: "system" as const, content: system },
@@ -94,10 +100,11 @@ async function* streamGroqResponse(
 async function* streamAnthropicResponse(
   apiKey: string,
   persona: Persona,
-  history: Message[]
+  history: Message[],
+  patientRequest?: string
 ): AsyncGenerator<{ textDelta: string }> {
   const client = new Anthropic({ apiKey });
-  const system = `${buildSystemPrompt(persona)}\n\nAdditional persona notes:\n${persona.systemPrompt}`;
+  const system = `${buildSystemPrompt(persona, patientRequest)}\n\nAdditional persona notes:\n${persona.systemPrompt}`;
 
   const anthropicMessages = history.map((m) => ({
     role: m.role as "user" | "assistant",
@@ -123,21 +130,22 @@ async function* streamAnthropicResponse(
 export async function* streamClaudeResponse(
   apiKey: string | undefined,
   persona: Persona,
-  history: Message[]
+  history: Message[],
+  patientRequest?: string
 ): AsyncGenerator<{ textDelta: string }> {
   const groqKey = process.env.GROQ_API_KEY;
 
   // Prefer Groq (free) if its key is set
   if (groqKey) {
     console.log("[LLM] Using Groq (llama-3.3-70b-versatile)");
-    yield* streamGroqResponse(groqKey, persona, history);
+    yield* streamGroqResponse(groqKey, persona, history, patientRequest);
     return;
   }
 
   // Fall back to Anthropic
   if (apiKey) {
     console.log("[LLM] Using Anthropic Claude Sonnet");
-    yield* streamAnthropicResponse(apiKey, persona, history);
+    yield* streamAnthropicResponse(apiKey, persona, history, patientRequest);
     return;
   }
 
