@@ -7,6 +7,7 @@ export interface SessionState {
   isSessionActive: boolean;
   startedAt: number | null;
   messages: Message[];
+  patientRequest: string;
   liveUserTranscript: string;
   assistantStreamingText: string;
   currentEmotion: Emotion;
@@ -42,6 +43,7 @@ export interface SessionState {
   setSessionId: (id: string | null) => void;
   setSessionActive: (active: boolean) => void;
   setStartedAt: (t: number | null) => void;
+  setPatientRequest: (text: string) => void;
   addMessage: (m: Message) => void;
   appendAssistantStream: (chunk: string) => void;
   setAssistantStreamingText: (t: string) => void;
@@ -69,6 +71,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   isSessionActive: false,
   startedAt: null,
   messages: [],
+  patientRequest: "",
   liveUserTranscript: "",
   assistantStreamingText: "",
   currentEmotion: "neutral",
@@ -88,6 +91,7 @@ export const useSessionStore = create<SessionState>((set) => ({
   setSessionId: (sessionId) => set({ sessionId }),
   setSessionActive: (isSessionActive) => set({ isSessionActive }),
   setStartedAt: (startedAt) => set({ startedAt }),
+  setPatientRequest: (patientRequest) => set({ patientRequest }),
   addMessage: (m) => set((s) => ({ messages: [...s.messages, m] })),
   appendAssistantStream: (chunk) =>
     set((s) => ({ assistantStreamingText: s.assistantStreamingText + chunk })),
@@ -145,6 +149,7 @@ export const useSessionStore = create<SessionState>((set) => ({
       isSessionActive: false,
       startedAt: null,
       messages: [],
+      patientRequest: "",
       liveUserTranscript: "",
       assistantStreamingText: "",
       currentEmotion: "neutral",

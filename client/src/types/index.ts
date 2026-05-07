@@ -73,13 +73,14 @@ export type VisemeSource =
 export const WS_PROTOCOL_VERSION = 2;
 
 export type WsClientMessage =
-  | { type: "session_start"; sessionId: string; personaId: string }
+  | { type: "session_start"; sessionId: string; personaId: string; patientRequest?: string }
   | { type: "session_end"; sessionId: string }
   | {
       type: "user_input";
       text: string;
       sessionId: string;
       personaId: string;
+      patientRequest?: string;
     };
 
 export type WsServerMessage =
@@ -94,6 +95,7 @@ export type WsServerMessage =
       audioMimeType: string;
       visemes: VisemeKeyframe[];
       visemeSource?: VisemeSource;
+      emotion?: Emotion;
       isLast: boolean;
       sentenceIndex: number;
       /** Sentence text — used by client for Web Speech Synthesis TTS fallback */

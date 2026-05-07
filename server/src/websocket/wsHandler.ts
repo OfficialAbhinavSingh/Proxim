@@ -23,6 +23,7 @@ function loadPersonas(): Persona[] {
 interface SessionCtx {
   personaId: string;
   messages: Message[];
+  patientRequest: string;
 }
 
 /** Per-turn latency tracking. */
@@ -32,8 +33,21 @@ interface LatencyCtx {
   ttsStartMs: number | null;
 }
 
+const MIN_CONTEXT_EXCHANGES = 15;
+const RECENT_CONTEXT_MESSAGES = MIN_CONTEXT_EXCHANGES * 2;
+
 function safeSend(ws: WebSocket, msg: WsServerMessage) {
   if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
+}
+
+function buildModelHistory(history: Message[]): Message[] {
+  if (history.length <= RECENT_CONTEXT_MESSAGES) return history;
+  return history.slice(-RECENT_CONTEXT_MESSAGES);
+}
+
+function cleanPatientRequest(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.trim().slice(0, 1600);
 }
 
 /**
@@ -92,6 +106,7 @@ export function createWsHandler() {
     sentence: string,
     sentenceIndex: number,
     isLast: boolean,
+    emotion: Emotion,
     latency: LatencyCtx
   ) {
     const elevenKey = process.env.ELEVENLABS_API_KEY;
@@ -115,7 +130,7 @@ export function createWsHandler() {
     // ── TTS priority: ElevenLabs (audio-aligned visemes) → Groq Orpheus (fallback) ──
     if (elevenKey) {
       try {
-        const res = await synthesizeSentenceWithTimestamps(elevenKey, persona.voiceId, sentence);
+        const res = await synthesizeSentenceWithTimestamps(elevenKey, persona.voiceId, sentence, emotion);
         if (res.audioBase64) {
           audioBase64 = res.audioBase64;
           audioMimeType = res.audioMimeType;
@@ -131,7 +146,7 @@ export function createWsHandler() {
     // Groq Orpheus fallback — per-persona voice assignment.
     if (!audioBase64 && groqKey) {
       try {
-        const groqWav = await synthesizeSentenceToWavWithGroq(groqKey, groqVoice, sentence);
+        const groqWav = await synthesizeSentenceToWavWithGroq(groqKey, groqVoice, sentence, emotion);
         if (groqWav.length > 0) {
           wav = groqWav;
           const rawVisemes = synthesizeVisemesFromText(sentence);
@@ -183,6 +198,7 @@ export function createWsHandler() {
       audioMimeType: audioBase64 ? audioMimeType : "audio/wav",
       visemes,
       visemeSource,
+      emotion,
       isLast,
       sentenceIndex,
       text: sentence,
@@ -196,13 +212,14 @@ export function createWsHandler() {
     persona: Persona,
     buffer: { value: string },
     sentenceCounter: { value: number },
+    emotion: Emotion,
     latency: LatencyCtx
   ) {
     for (;;) {
       const { sentence, rest } = splitLeadingSentence(buffer.value);
       if (!sentence) break;
       buffer.value = rest;
-      await processSentencePipeline(ws, persona, sentence, sentenceCounter.value, false, latency);
+      await processSentencePipeline(ws, persona, sentence, sentenceCounter.value, false, emotion, latency);
       sentenceCounter.value += 1;
     }
   }
@@ -213,24 +230,26 @@ export function createWsHandler() {
     persona: Persona,
     buffer: { value: string },
     sentenceCounter: { value: number },
+    emotion: Emotion,
     latency: LatencyCtx
   ) {
-    await emitCompleteSentences(ws, persona, buffer, sentenceCounter, latency);
+    await emitCompleteSentences(ws, persona, buffer, sentenceCounter, emotion, latency);
     const tail = buffer.value.trim();
     if (tail.length) {
-      await processSentencePipeline(ws, persona, tail, sentenceCounter.value, true, latency);
+      await processSentencePipeline(ws, persona, tail, sentenceCounter.value, true, emotion, latency);
       sentenceCounter.value += 1;
       buffer.value = "";
       return;
     }
     if (sentenceCounter.value === 0) {
-      await processSentencePipeline(ws, persona, "Thanks for your time.", 0, true, latency);
+      await processSentencePipeline(ws, persona, "Thanks for your time.", 0, true, emotion, latency);
     } else {
       safeSend(ws, {
         type: "audio_chunk",
         audioBase64: bufferToBase64(minimalSilenceWav()),
         audioMimeType: "audio/wav",
         visemes: [{ time: 0, viseme: "sil", weight: 0 }],
+        emotion,
         isLast: true,
         sentenceIndex: sentenceCounter.value,
       });
@@ -241,6 +260,7 @@ export function createWsHandler() {
     ws: WebSocket,
     persona: Persona,
     history: Message[],
+    patientRequest: string,
     latency: LatencyCtx
   ): Promise<{ displayText: string; emotion: Emotion } | null> {
     let raw = "";
@@ -254,7 +274,8 @@ export function createWsHandler() {
       for await (const { textDelta } of streamClaudeResponse(
         process.env.ANTHROPIC_API_KEY,
         persona,
-        history
+        buildModelHistory(history),
+        patientRequest
       )) {
         raw += textDelta;
         const { emotion, displayText } = stripEmotionTag(raw);
@@ -288,7 +309,7 @@ export function createWsHandler() {
           });
         }
 
-        await emitCompleteSentences(ws, persona, ttsBuf, sentenceCounter, latency);
+        await emitCompleteSentences(ws, persona, ttsBuf, sentenceCounter, emotion, latency);
       }
 
       const { emotion, displayText } = stripEmotionTag(raw);
@@ -305,7 +326,7 @@ export function createWsHandler() {
         emotion,
       });
 
-      await emitFinalTail(ws, persona, ttsBuf, sentenceCounter, latency);
+      await emitFinalTail(ws, persona, ttsBuf, sentenceCounter, emotion, latency);
 
       // Emit server-side latency telemetry for this turn.
       const totalMs = Date.now() - latency.t0;
@@ -337,8 +358,14 @@ export function createWsHandler() {
     }
   }
 
-  async function sendIntro(ws: WebSocket, persona: Persona, latency: LatencyCtx) {
-    const greeting = `[ENGAGED]\nHello — I'm ${persona.name}. I only have a few minutes, but I'm listening. What should we focus on today?`;
+  function buildIntroGreeting(persona: Persona, patientRequest = "") {
+    return patientRequest.trim()
+      ? `[CONCERNED]\nHello — I'm ${persona.name}. I saw the patient context you shared. Before we talk product, I want to understand how your data helps with that specific concern.`
+      : `[ENGAGED]\nHello — I'm ${persona.name}. I only have a few minutes, but I'm listening. What should we focus on today?`;
+  }
+
+  async function sendIntro(ws: WebSocket, persona: Persona, latency: LatencyCtx, patientRequest = "") {
+    const greeting = buildIntroGreeting(persona, patientRequest);
     const { emotion, displayText } = stripEmotionTag(greeting);
     safeSend(ws, { type: "emotion", tag: emotion });
     safeSend(ws, {
@@ -349,7 +376,7 @@ export function createWsHandler() {
     });
     const ttsBuf = { value: displayText };
     const sentenceCounter = { value: 0 };
-    await emitFinalTail(ws, persona, ttsBuf, sentenceCounter, latency);
+    await emitFinalTail(ws, persona, ttsBuf, sentenceCounter, emotion, latency);
   }
 
   return async function handleMessage(ws: WebSocket, raw: string) {
@@ -367,6 +394,7 @@ export function createWsHandler() {
         safeSend(ws, { type: "error", message: "Unknown persona" });
         return;
       }
+      const patientRequest = cleanPatientRequest(msg.patientRequest);
       const existing = sessions.get(msg.sessionId);
       const cap = {
         type: "capabilities" as const,
@@ -380,26 +408,26 @@ export function createWsHandler() {
       };
 
       if (existing?.messages.some((m) => m.role === "user")) {
+        existing.patientRequest = patientRequest || existing.patientRequest;
         safeSend(ws, { type: "session_start", sessionId: msg.sessionId, personaId: msg.personaId });
         safeSend(ws, cap);
         return;
       }
       if (existing && !existing.messages.some((m) => m.role === "user")) {
+        existing.patientRequest = patientRequest || existing.patientRequest;
         safeSend(ws, { type: "session_start", sessionId: msg.sessionId, personaId: msg.personaId });
         safeSend(ws, cap);
         return;
       }
 
-      sessions.set(msg.sessionId, { personaId: persona.id, messages: [] });
+      sessions.set(msg.sessionId, { personaId: persona.id, messages: [], patientRequest });
       safeSend(ws, { type: "session_start", sessionId: msg.sessionId, personaId: msg.personaId });
       safeSend(ws, cap);
 
       const introLatency: LatencyCtx = { t0: Date.now(), llmFirstTokenMs: null, ttsStartMs: null };
-      await sendIntro(ws, persona, introLatency);
+      await sendIntro(ws, persona, introLatency, patientRequest);
 
-      const intro = stripEmotionTag(
-        `[ENGAGED]\nHello — I'm ${persona.name}. I only have a few minutes, but I'm listening. What should we focus on today?`
-      );
+      const intro = stripEmotionTag(buildIntroGreeting(persona, patientRequest));
       const ctx0 = sessions.get(msg.sessionId);
       if (ctx0) {
         ctx0.messages.push({
@@ -443,9 +471,12 @@ export function createWsHandler() {
       const latency: LatencyCtx = { t0: Date.now(), llmFirstTokenMs: null, ttsStartMs: null };
       console.log(`[Latency] Turn started for session ${msg.sessionId.slice(0, 8)}`);
 
+      const nextPatientRequest = cleanPatientRequest(msg.patientRequest);
+      if (nextPatientRequest) ctx.patientRequest = nextPatientRequest;
+
       ctx.messages.push({ role: "user", content: msg.text, timestamp: Date.now() });
       const history = [...ctx.messages];
-      const result = await streamAssistantTurn(ws, persona, history, latency);
+      const result = await streamAssistantTurn(ws, persona, history, ctx.patientRequest, latency);
       if (result) {
         ctx.messages.push({
           role: "assistant",

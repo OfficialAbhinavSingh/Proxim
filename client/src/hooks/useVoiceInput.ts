@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const SILENCE_MS_WEBSPEECH = 520;
+const SILENCE_MS_WEBSPEECH = 240;
+const FAST_FINAL_SUBMIT_MS = 140;
 const PCM_SAMPLE_RATE = 16_000;
 const PCM_SPEECH_THRESHOLD = 0.0025;
 const PCM_PEAK_THRESHOLD = 0.035;
-const PCM_SILENCE_FRAMES = 15;
-const PCM_MIN_SPEECH_FRAMES = 5;
-const PCM_ROLLING_MAX_FRAMES = 250;
-const PCM_MAX_FRAMES = 230;
-const PCM_BUFFER_SIZE = 2048;
-const PCM_MANUAL_TAIL_FRAMES = 48;
-const POST_SPEAK_COOLDOWN_MS = 450;
+const PCM_SILENCE_FRAMES = 3;
+const PCM_MIN_SPEECH_FRAMES = 3;
+const PCM_ROLLING_MAX_FRAMES = 320;
+const PCM_MAX_FRAMES = 160;
+const PCM_BUFFER_SIZE = 1024;
+const PCM_MANUAL_TAIL_FRAMES = 32;
+const POST_SPEAK_COOLDOWN_MS = 180;
 
 const DEBUG = true;
 const log = (...args: unknown[]) => { if (DEBUG) console.log("[voice]", ...args); };
@@ -64,7 +65,10 @@ export function useVoiceInput({
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const partialRecognitionRef = useRef<SpeechRecognition | null>(null);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fastSubmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTextRef = useRef("");
+  const committedTextRef = useRef("");
+  const lastSubmittedRef = useRef({ text: "", at: 0 });
 
   const pipelineActiveRef = useRef(false);
   const streamRef = useRef<MediaStream | null>(null);
@@ -97,12 +101,17 @@ export function useVoiceInput({
   useEffect(() => {
     if (avatarSpeaking) {
       if (cooldownTimerRef.current) { clearTimeout(cooldownTimerRef.current); cooldownTimerRef.current = null; }
+      if (fastSubmitTimerRef.current) {
+        clearTimeout(fastSubmitTimerRef.current);
+        fastSubmitTimerRef.current = null;
+      }
       mutedRef.current = true;
       pcmSamplesRef.current = [];
       pcmSpeakingRef.current = false;
       pcmSilenceFramesRef.current = 0;
       pcmSpeechFramesRef.current = 0;
       lastTextRef.current = "";
+      committedTextRef.current = "";
       onPartialRef.current?.("");
       setPartialTranscript("");
     } else {
@@ -137,10 +146,56 @@ export function useVoiceInput({
     }
   }, []);
 
+  const clearFastSubmitTimer = useCallback(() => {
+    if (fastSubmitTimerRef.current) {
+      clearTimeout(fastSubmitTimerRef.current);
+      fastSubmitTimerRef.current = null;
+    }
+  }, []);
+
+  const submitRecognizedText = useCallback(
+    (text: string, source: string) => {
+      const t = text.trim();
+      if (!t || mutedRef.current || !enabledRef.current) return;
+
+      const now = performance.now();
+      if (lastSubmittedRef.current.text === t && now - lastSubmittedRef.current.at < 1200) return;
+      lastSubmittedRef.current = { text: t, at: now };
+
+      clearSilenceTimer();
+      clearFastSubmitTimer();
+      pcmSamplesRef.current = [];
+      pcmSpeakingRef.current = false;
+      pcmSilenceFramesRef.current = 0;
+      pcmSpeechFramesRef.current = 0;
+      pcmTotalFramesRef.current = 0;
+      lastTextRef.current = "";
+      committedTextRef.current = "";
+      onPartialRef.current?.("");
+      setPartialTranscript("");
+      log(`${source} utterance ->`, t);
+      onUtteranceRef.current(t);
+    },
+    [clearFastSubmitTimer, clearSilenceTimer]
+  );
+
+  const scheduleFastSubmit = useCallback(
+    (text: string, source: string) => {
+      clearFastSubmitTimer();
+      fastSubmitTimerRef.current = setTimeout(() => {
+        fastSubmitTimerRef.current = null;
+        submitRecognizedText(text, source);
+      }, FAST_FINAL_SUBMIT_MS);
+    },
+    [clearFastSubmitTimer, submitRecognizedText]
+  );
+
   const stopPartialWebSpeech = useCallback(() => {
+    clearFastSubmitTimer();
     try { partialRecognitionRef.current?.stop(); } catch { /* ignore */ }
     partialRecognitionRef.current = null;
-  }, []);
+    committedTextRef.current = "";
+  }, [clearFastSubmitTimer]);
 
   const startPartialWebSpeech = useCallback(() => {
     const SR = getSpeechRecognitionCtor();
@@ -151,6 +206,13 @@ export function useVoiceInput({
     rec.interimResults = true;
     rec.lang = "en-US";
 
+    rec.onspeechstart = () => {
+      if (!lastTextRef.current.trim()) {
+        setPartialTranscript("Listening...");
+        onPartialRef.current?.("Listening...");
+      }
+    };
+
     rec.onresult = (ev: SpeechRecognitionEvent) => {
       let interim = "";
       let finalChunk = "";
@@ -159,7 +221,11 @@ export function useVoiceInput({
         if (r.isFinal) finalChunk += r[0].transcript;
         else interim += r[0].transcript;
       }
-      const combined = (finalChunk + interim).trim();
+      if (finalChunk.trim()) {
+        committedTextRef.current = `${committedTextRef.current} ${finalChunk}`.trim();
+        scheduleFastSubmit(committedTextRef.current, "fast webspeech");
+      }
+      const combined = `${committedTextRef.current} ${interim}`.trim();
       if (!combined) return;
       lastTextRef.current = combined;
       setPartialTranscript(combined);
@@ -184,7 +250,7 @@ export function useVoiceInput({
       partialRecognitionRef.current = null;
       return false;
     }
-  }, [getSpeechRecognitionCtor]);
+  }, [getSpeechRecognitionCtor, scheduleFastSubmit]);
 
   const transcribeBlob = useCallback(async (blob: Blob, label = "") => {
     const api = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
@@ -227,12 +293,14 @@ export function useVoiceInput({
       pcmSpeechFramesRef.current = 0;
       pcmTotalFramesRef.current = 0;
       lastTextRef.current = "";
+      committedTextRef.current = "";
       onPartialRef.current?.("");
       setPartialTranscript("");
       return;
     }
 
     pcmFlushingRef.current = true;
+    clearFastSubmitTimer();
 
     let chunks = pcmSamplesRef.current;
     if (manualFlush && speechFrames < PCM_MIN_SPEECH_FRAMES && chunks.length > PCM_MANUAL_TAIL_FRAMES) {
@@ -259,10 +327,11 @@ export function useVoiceInput({
     const blob = encodeWav(merged, PCM_SAMPLE_RATE);
     await transcribeBlob(blob);
     lastTextRef.current = "";
+    committedTextRef.current = "";
     onPartialRef.current?.("");
     setPartialTranscript("");
     pcmFlushingRef.current = false;
-  }, [transcribeBlob]);
+  }, [clearFastSubmitTimer, transcribeBlob]);
 
   const stopPcmPipeline = useCallback(() => {
     log("stopPcmPipeline");
@@ -283,6 +352,7 @@ export function useVoiceInput({
     pcmTotalFramesRef.current = 0;
     pcmFlushingRef.current = false;
     lastTextRef.current = "";
+    committedTextRef.current = "";
     onPartialRef.current?.("");
     stopPartialWebSpeech();
     setListening(false);
@@ -326,6 +396,7 @@ export function useVoiceInput({
           pcmSilenceFramesRef.current = 0;
           pcmSpeechFramesRef.current = 0;
           lastTextRef.current = "";
+          committedTextRef.current = "";
           onPartialRef.current?.("");
           setPartialTranscript("");
           return;
@@ -395,6 +466,7 @@ export function useVoiceInput({
         onUtteranceRef.current(t);
       }
       lastTextRef.current = "";
+      committedTextRef.current = "";
       onPartialRef.current?.("");
       setPartialTranscript("");
       silenceTimerRef.current = null;
@@ -403,12 +475,14 @@ export function useVoiceInput({
 
   const stopWebSpeech = useCallback(() => {
     clearSilenceTimer();
+    clearFastSubmitTimer();
     try { recognitionRef.current?.stop(); } catch { /* ignore */ }
     recognitionRef.current = null;
     lastTextRef.current = "";
+    committedTextRef.current = "";
     onPartialRef.current?.("");
     setPartialTranscript("");
-  }, [clearSilenceTimer]);
+  }, [clearFastSubmitTimer, clearSilenceTimer]);
 
   const startWebSpeech = useCallback((): boolean => {
     const SR = getSpeechRecognitionCtor();
@@ -425,6 +499,13 @@ export function useVoiceInput({
     rec.interimResults = true;
     rec.lang = "en-US";
 
+    rec.onspeechstart = () => {
+      if (!lastTextRef.current.trim()) {
+        setPartialTranscript("Listening...");
+        onPartialRef.current?.("Listening...");
+      }
+    };
+
     rec.onresult = (ev: SpeechRecognitionEvent) => {
       let interim = "";
       let finalChunk = "";
@@ -433,7 +514,10 @@ export function useVoiceInput({
         if (r.isFinal) finalChunk += r[0].transcript;
         else interim += r[0].transcript;
       }
-      const combined = (finalChunk + interim).trim();
+      if (finalChunk.trim()) {
+        committedTextRef.current = `${committedTextRef.current} ${finalChunk}`.trim();
+      }
+      const combined = `${committedTextRef.current} ${interim}`.trim();
       if (combined) {
         setPartialTranscript(combined);
         onPartialRef.current?.(combined);
@@ -522,6 +606,7 @@ interface SpeechRecognition extends EventTarget {
   onresult: ((this: SpeechRecognition, ev: SpeechRecognitionEvent) => void) | null;
   onerror: ((this: SpeechRecognition, ev: SpeechRecognitionErrorEvent) => void) | null;
   onend: ((this: SpeechRecognition, ev: Event) => void) | null;
+  onspeechstart?: ((this: SpeechRecognition, ev: Event) => void) | null;
 }
 interface SpeechRecognitionEvent extends Event {
   readonly resultIndex: number;

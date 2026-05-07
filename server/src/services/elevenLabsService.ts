@@ -1,5 +1,21 @@
 import { Buffer } from "node:buffer";
-import type { VisemeKey, VisemeKeyframe, VisemeSource } from "../types/index.js";
+import type { Emotion, VisemeKey, VisemeKeyframe, VisemeSource } from "../types/index.js";
+
+function voiceSettingsForEmotion(emotion: Emotion | undefined) {
+  const base = { stability: 0.42, similarity_boost: 0.78, style: 0.35, use_speaker_boost: true };
+  switch (emotion) {
+    case "concerned":
+      return { ...base, stability: 0.58, style: 0.55 };
+    case "skeptical":
+      return { ...base, stability: 0.62, style: 0.28 };
+    case "positive":
+      return { ...base, stability: 0.34, style: 0.72 };
+    case "engaged":
+      return { ...base, stability: 0.38, style: 0.58 };
+    default:
+      return base;
+  }
+}
 
 /**
  * Streams ElevenLabs TTS into a single buffer (per sentence) using fetch ReadableStream.
@@ -8,7 +24,8 @@ import type { VisemeKey, VisemeKeyframe, VisemeSource } from "../types/index.js"
 export async function synthesizeSentenceToPcm(
   apiKey: string | undefined,
   voiceId: string,
-  text: string
+  text: string,
+  emotion?: Emotion
 ): Promise<{ pcm: Buffer; sampleRate: number }> {
   const defaultVoice = process.env.ELEVENLABS_DEFAULT_VOICE_ID;
   const vid =
@@ -28,7 +45,7 @@ export async function synthesizeSentenceToPcm(
     body: JSON.stringify({
       text,
       model_id: "eleven_turbo_v2_5",
-      voice_settings: { stability: 0.45, similarity_boost: 0.75 },
+      voice_settings: voiceSettingsForEmotion(emotion),
     }),
   });
 
@@ -186,7 +203,8 @@ export function visemesFromElevenAlignment(alignment: ElevenAlignment | undefine
 export async function synthesizeSentenceWithTimestamps(
   apiKey: string | undefined,
   voiceId: string,
-  text: string
+  text: string,
+  emotion?: Emotion
 ): Promise<{ audioBase64: string; audioMimeType: string; visemes: VisemeKeyframe[]; source: VisemeSource }> {
   const defaultVoice = process.env.ELEVENLABS_DEFAULT_VOICE_ID;
   const vid =
@@ -211,7 +229,7 @@ export async function synthesizeSentenceWithTimestamps(
     body: JSON.stringify({
       text,
       model_id: "eleven_turbo_v2_5",
-      voice_settings: { stability: 0.45, similarity_boost: 0.75 },
+      voice_settings: voiceSettingsForEmotion(emotion),
     }),
   });
 

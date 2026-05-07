@@ -10,6 +10,7 @@ export interface AudioChunkPayload {
   audioMimeType: string;
   visemes: VisemeKeyframe[];
   visemeSource?: VisemeSource;
+  emotion?: Emotion;
   isLast: boolean;
   sentenceIndex: number;
   /** Sentence text for Web Speech Synthesis fallback */
@@ -111,6 +112,7 @@ export function useWebSocket() {
             audioMimeType: data.audioMimeType,
             visemes: data.visemes,
             visemeSource: data.visemeSource,
+            emotion: data.emotion,
             isLast: data.isLast,
             sentenceIndex: data.sentenceIndex,
             text: data.text,

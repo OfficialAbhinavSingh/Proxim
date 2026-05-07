@@ -6,10 +6,21 @@ import type { ReactNode } from "react";
 import { useAvatarMorphs, useAvatarIdleClock, useAvatarTrackSubscription } from "../hooks/useAvatar";
 import { useSessionStore } from "../store/sessionStore";
 import { useAvatarStore } from "../store/avatarStore";
-import { KTX2Loader } from "three-stdlib";
+import { KTX2Loader, SkeletonUtils } from "three-stdlib";
 import type { VisemeKeyframe, VisemeKey } from "../types";
 
 type MorphHost = THREE.SkinnedMesh | THREE.Mesh;
+const LOCKED_PORTRAIT_SCALE = 1.02;
+const LOCKED_FACE_CENTER = new THREE.Vector3(0, 1.56, 0.01);
+const MOTION_SCALE = 0.68;
+
+type ResponseCues = {
+  nod: number;
+  tilt: number;
+  focus: number;
+  warmth: number;
+  skepticism: number;
+};
 
 function findMorphHost(root: THREE.Object3D): { mesh: MorphHost; dict: Record<string, number> } | null {
   let bestScore = -1;
@@ -107,6 +118,22 @@ function pickVisemeAtTime(frames: VisemeKeyframe[], t: number): { key: VisemeKey
   return { key: cur.viseme, weight: cur.weight };
 }
 
+function inferResponseCues(text: string): ResponseCues {
+  const lower = text.toLowerCase();
+  const hasQuestion = /\?|\b(can|could|would|how|what|why|which|where|when)\b/.test(lower);
+  const hasContrast = /\b(but|however|although|concern|risk|not sure|skeptical|uncomfortable)\b/.test(lower);
+  const hasPositive = /\b(good|helpful|reasonable|agree|yes|right|positive|useful|promising)\b/.test(lower);
+  const hasEngaged = /\b(tell me|listening|focus|understand|explain|share|show me)\b/.test(lower);
+
+  return {
+    nod: hasPositive ? 1 : hasEngaged ? 0.55 : 0,
+    tilt: hasQuestion ? 1 : hasContrast ? -0.55 : 0,
+    focus: hasQuestion || hasEngaged ? 1 : 0.35,
+    warmth: hasPositive ? 1 : hasEngaged ? 0.45 : 0,
+    skepticism: hasContrast ? 1 : 0,
+  };
+}
+
 interface AvatarModelProps {
   url: string;
   /** Rendered instead of the GLB when the model fails to load. */
@@ -130,6 +157,7 @@ function AvatarModelInner({
   fallback?: ReactNode;
 }) {
   const gl = useThree((s) => s.gl);
+  const mixerRef = useRef<THREE.AnimationMixer | null>(null);
   // Record the resolved URL so diagnostics can confirm what we attempted to load.
   useEffect(() => {
     useAvatarStore.getState().setAvatarAssetInfo({ resolvedUrl: url, loadError: null, renderMode: "loading" });
@@ -177,7 +205,8 @@ function AvatarModelInner({
   }
 
   const { scene } = gltf;
-  const clone = useMemo(() => scene.clone(true), [scene]);
+  const animations = gltf.animations;
+  const clone = useMemo(() => SkeletonUtils.clone(scene), [scene]);
   const group = useRef<THREE.Group>(null);
   const [morphHost, setMorphHost] = useState<{ mesh: MorphHost; dict: Record<string, number> } | null>(
     null
@@ -215,39 +244,56 @@ function AvatarModelInner({
     });
   }, [url]);
 
-  // Auto-frame: center the portrait around the detected face/head rather than the full body.
+  useEffect(() => {
+    if (!animations.length) {
+      mixerRef.current = null;
+      return;
+    }
+
+    const mixer = new THREE.AnimationMixer(clone);
+    for (const clip of animations) {
+      const action = mixer.clipAction(clip);
+      action.reset();
+      action.setLoop(THREE.LoopRepeat, Infinity);
+      action.fadeIn(0.2);
+      action.play();
+    }
+    mixerRef.current = mixer;
+
+    return () => {
+      mixer.stopAllAction();
+      mixerRef.current = null;
+    };
+  }, [animations, clone]);
+
+  // Locked portrait framing: every persona uses the same crop/scale so the bust framing never drifts.
   useLayoutEffect(() => {
     const g = group.current;
     if (!g) return;
 
     const fullBox = new THREE.Box3().setFromObject(clone);
-    const fullSize = fullBox.getSize(new THREE.Vector3());
     const fullCenter = fullBox.getCenter(new THREE.Vector3());
 
     const focusObject = morphHost?.mesh ?? bones.head ?? clone;
     const focusBox = new THREE.Box3().setFromObject(focusObject);
-    const focusSize = focusBox.getSize(new THREE.Vector3());
     const focusCenter = focusBox.getCenter(new THREE.Vector3());
 
-    const referenceHeight = Math.max(0.0001, focusSize.y || fullSize.y || 0.0001);
-    const desiredFocusHeight = 0.9;
-    const scale = desiredFocusHeight / referenceHeight;
+    const scale = LOCKED_PORTRAIT_SCALE;
     g.scale.setScalar(scale);
 
-    const targetFaceCenter = new THREE.Vector3(0, 1.5, 0.01);
-    const x = targetFaceCenter.x - focusCenter.x * scale;
-    const y = targetFaceCenter.y - focusCenter.y * scale;
-    const z = targetFaceCenter.z - focusCenter.z * scale;
-
-    // Keep the model from floating too high or low if a mesh reports a strange face box.
-    const shouldersVisibleBias = THREE.MathUtils.clamp((-fullBox.min.y * scale) - 1.52, -0.18, 0.22);
-    g.position.set(x - fullCenter.x * scale * 0.02, y + shouldersVisibleBias, z - fullCenter.z * scale * 0.05);
+    g.position.set(
+      LOCKED_FACE_CENTER.x - focusCenter.x * scale - fullCenter.x * scale * 0.02,
+      LOCKED_FACE_CENTER.y - focusCenter.y * scale + 0.025,
+      LOCKED_FACE_CENTER.z - focusCenter.z * scale - fullCenter.z * scale * 0.04
+    );
   }, [clone, morphHost]);
 
   const { applyFrame } = useAvatarMorphs(morphHost?.dict);
   const { tickIdle } = useAvatarIdleClock();
   const { chunkStartedAt, visemes } = useAvatarTrackSubscription();
   const currentEmotion = useSessionStore((s) => s.currentEmotion);
+  const assistantStreamingText = useSessionStore((s) => s.assistantStreamingText);
+  const responseCues = useMemo(() => inferResponseCues(assistantStreamingText), [assistantStreamingText]);
   const gazeRef = useRef({
     yaw: 0,
     pitch: 0,
@@ -305,13 +351,15 @@ function AvatarModelInner({
     const lHand = findFirstBoneByName(root, [/lefthand/i, /hand_l/i, /^wrist_l/i, /leftwrist/i]);
     const rHand = findFirstBoneByName(root, [/righthand/i, /hand_r/i, /^wrist_r/i, /rightwrist/i]);
     const jaw = findFirstBoneByName(root, [/jaw/i, /chin/i]);
+    const neck = findFirstBoneByName(root, [/^neck$/i, /neck/i]);
     const lEye = findFirstBoneByName(root, [/lefteye/i, /^eye_l/i, /eyel/i]);
     const rEye = findFirstBoneByName(root, [/righteye/i, /^eye_r/i, /eyer/i]);
-    return { head, spine, lArm, rArm, lFore, rFore, lHand, rHand, jaw, lEye, rEye };
+    return { head, neck, spine, lArm, rArm, lFore, rFore, lHand, rHand, jaw, lEye, rEye };
   }, [clone]);
 
   const restRot = useRef<{
     head?: THREE.Euler;
+    neck?: THREE.Euler;
     spine?: THREE.Euler;
     lArm?: THREE.Euler;
     rArm?: THREE.Euler;
@@ -328,6 +376,7 @@ function AvatarModelInner({
     // Store rest rotations once we have the bones.
     restRot.current = {
       head: bones.head?.rotation.clone(),
+      neck: bones.neck?.rotation.clone(),
       spine: bones.spine?.rotation.clone(),
       lArm: bones.lArm?.rotation.clone(),
       rArm: bones.rArm?.rotation.clone(),
@@ -344,6 +393,7 @@ function AvatarModelInner({
   useFrame((_, dt) => {
     const g = group.current;
     if (!g) return;
+    mixerRef.current?.update(dt);
 
     const infl = morphHost?.mesh.morphTargetInfluences;
 
@@ -363,34 +413,48 @@ function AvatarModelInner({
     // - While speaking: arm gestures get stronger.
     const t = performance.now() / 1000;
     const gesture = THREE.MathUtils.smoothstep(speechEnergy, 0.05, 0.65);
-    const breathe = Math.sin(t * Math.PI * 2 * 0.22) * THREE.MathUtils.degToRad(2.2);
-    const sway = Math.sin(t * Math.PI * 2 * 0.12) * THREE.MathUtils.degToRad(2.6);
-    const talkBob = Math.sin(t * Math.PI * 2 * (1.6 + gesture * 0.4)) * THREE.MathUtils.degToRad(2.0) * gesture;
+    const breathe = Math.sin(t * Math.PI * 2 * 0.2) * THREE.MathUtils.degToRad(1.45);
+    const sway = Math.sin(t * Math.PI * 2 * 0.1) * THREE.MathUtils.degToRad(1.4);
+    const nodPulse =
+      Math.sin(t * Math.PI * 2 * (0.5 + responseCues.nod * 0.16)) *
+      THREE.MathUtils.degToRad(0.85) *
+      gesture *
+      responseCues.nod;
+    const inquiryTilt =
+      Math.sin(t * Math.PI * 2 * 0.22) *
+      THREE.MathUtils.degToRad(0.75) *
+      gesture *
+      responseCues.tilt;
+    const talkBob =
+      Math.sin(t * Math.PI * 2 * (1.15 + gesture * 0.22)) *
+      THREE.MathUtils.degToRad(1.05) *
+      gesture *
+      MOTION_SCALE;
     const emotionOffsets = {
       neutral: { headPitch: 0, headYaw: 0, headRoll: 0, torsoLean: 0 },
       engaged: {
-        headPitch: THREE.MathUtils.degToRad(-0.8),
-        headYaw: THREE.MathUtils.degToRad(1.8),
-        headRoll: THREE.MathUtils.degToRad(1.2),
-        torsoLean: THREE.MathUtils.degToRad(-1.4),
+        headPitch: THREE.MathUtils.degToRad(-0.45),
+        headYaw: THREE.MathUtils.degToRad(0.95),
+        headRoll: THREE.MathUtils.degToRad(0.6),
+        torsoLean: THREE.MathUtils.degToRad(-0.75),
       },
       skeptical: {
-        headPitch: THREE.MathUtils.degToRad(1.4),
-        headYaw: THREE.MathUtils.degToRad(-2.6),
-        headRoll: THREE.MathUtils.degToRad(-4),
-        torsoLean: THREE.MathUtils.degToRad(0.6),
+        headPitch: THREE.MathUtils.degToRad(0.95),
+        headYaw: THREE.MathUtils.degToRad(-1.45),
+        headRoll: THREE.MathUtils.degToRad(-2.3),
+        torsoLean: THREE.MathUtils.degToRad(0.35),
       },
       concerned: {
-        headPitch: THREE.MathUtils.degToRad(2.8),
-        headYaw: THREE.MathUtils.degToRad(-0.8),
-        headRoll: THREE.MathUtils.degToRad(-1.2),
-        torsoLean: THREE.MathUtils.degToRad(1.6),
+        headPitch: THREE.MathUtils.degToRad(1.75),
+        headYaw: THREE.MathUtils.degToRad(-0.45),
+        headRoll: THREE.MathUtils.degToRad(-0.65),
+        torsoLean: THREE.MathUtils.degToRad(0.95),
       },
       positive: {
-        headPitch: THREE.MathUtils.degToRad(-1.6),
-        headYaw: THREE.MathUtils.degToRad(2.2),
-        headRoll: THREE.MathUtils.degToRad(2.2),
-        torsoLean: THREE.MathUtils.degToRad(-1.1),
+        headPitch: THREE.MathUtils.degToRad(-0.95),
+        headYaw: THREE.MathUtils.degToRad(1.15),
+        headRoll: THREE.MathUtils.degToRad(1.1),
+        torsoLean: THREE.MathUtils.degToRad(-0.6),
       },
     } as const;
     const emotionOffset = emotionOffsets[currentEmotion];
@@ -401,28 +465,34 @@ function AvatarModelInner({
     if (t >= gaze.nextShiftAt) {
       const lookBias = {
         neutral: { yaw: 0, pitch: 0 },
-        engaged: { yaw: THREE.MathUtils.degToRad(1.1), pitch: THREE.MathUtils.degToRad(-0.4) },
-        skeptical: { yaw: THREE.MathUtils.degToRad(-1.8), pitch: THREE.MathUtils.degToRad(0.7) },
-        concerned: { yaw: THREE.MathUtils.degToRad(-0.6), pitch: THREE.MathUtils.degToRad(1.2) },
-        positive: { yaw: THREE.MathUtils.degToRad(1.6), pitch: THREE.MathUtils.degToRad(-0.8) },
+        engaged: { yaw: THREE.MathUtils.degToRad(0.75), pitch: THREE.MathUtils.degToRad(-0.25) },
+        skeptical: { yaw: THREE.MathUtils.degToRad(-1.1), pitch: THREE.MathUtils.degToRad(0.45) },
+        concerned: { yaw: THREE.MathUtils.degToRad(-0.35), pitch: THREE.MathUtils.degToRad(0.75) },
+        positive: { yaw: THREE.MathUtils.degToRad(1), pitch: THREE.MathUtils.degToRad(-0.5) },
       } as const;
       const bias = lookBias[currentEmotion];
       gaze.targetYaw = THREE.MathUtils.clamp(
-        bias.yaw + (Math.random() - 0.5) * THREE.MathUtils.degToRad(9.5) + gesture * THREE.MathUtils.degToRad(1.5),
-        THREE.MathUtils.degToRad(-7),
-        THREE.MathUtils.degToRad(7)
-      );
-      gaze.targetPitch = THREE.MathUtils.clamp(
-        bias.pitch + (Math.random() - 0.45) * THREE.MathUtils.degToRad(5.6) - gesture * THREE.MathUtils.degToRad(0.4),
+        bias.yaw +
+          (Math.random() - 0.5) * THREE.MathUtils.degToRad(5.2) +
+          gesture * THREE.MathUtils.degToRad(0.65) +
+          responseCues.skepticism * THREE.MathUtils.degToRad(-0.5),
         THREE.MathUtils.degToRad(-4.8),
         THREE.MathUtils.degToRad(4.8)
       );
-      gaze.nextShiftAt = t + 0.9 + Math.random() * 1.6 - gesture * 0.28;
+      gaze.targetPitch = THREE.MathUtils.clamp(
+        bias.pitch +
+          (Math.random() - 0.45) * THREE.MathUtils.degToRad(3.4) -
+          gesture * THREE.MathUtils.degToRad(0.2) -
+          responseCues.focus * THREE.MathUtils.degToRad(0.25),
+        THREE.MathUtils.degToRad(-3.2),
+        THREE.MathUtils.degToRad(3.2)
+      );
+      gaze.nextShiftAt = t + 1.25 + Math.random() * 1.9 - gesture * 0.18 - responseCues.focus * 0.18;
     }
-    gaze.yaw = THREE.MathUtils.lerp(gaze.yaw, gaze.targetYaw, 0.06 + gesture * 0.06);
-    gaze.pitch = THREE.MathUtils.lerp(gaze.pitch, gaze.targetPitch, 0.05 + gesture * 0.04);
-    const microSaccadeX = Math.sin(t * 8.2) * THREE.MathUtils.degToRad(0.35);
-    const microSaccadeY = Math.cos(t * 6.8) * THREE.MathUtils.degToRad(0.22);
+    gaze.yaw = THREE.MathUtils.lerp(gaze.yaw, gaze.targetYaw, 0.045 + gesture * 0.045);
+    gaze.pitch = THREE.MathUtils.lerp(gaze.pitch, gaze.targetPitch, 0.04 + gesture * 0.03);
+    const microSaccadeX = Math.sin(t * 7.4) * THREE.MathUtils.degToRad(0.18);
+    const microSaccadeY = Math.cos(t * 6.1) * THREE.MathUtils.degToRad(0.12);
     const gazeYaw = gaze.yaw + microSaccadeX;
     const gazePitch = gaze.pitch + microSaccadeY;
     const blink = tickIdle(infl, blinkIndices, dt, Math.max(0, Math.abs(gaze.targetYaw - gaze.yaw) * 9 - 0.12));
@@ -438,38 +508,56 @@ function AvatarModelInner({
     applyBone(
       bones.spine,
       restRot.current.spine,
-      breathe + talkBob * 0.5 + emotionOffset.torsoLean,
-      sway * 0.4,
-      sway * 0.25
+      breathe + talkBob * 0.28 + emotionOffset.torsoLean,
+      sway * 0.28,
+      sway * 0.16 + inquiryTilt * 0.12
+    );
+    applyBone(
+      bones.neck,
+      restRot.current.neck,
+      talkBob * 0.22 +
+        nodPulse * 0.5 +
+        emotionOffset.headPitch * 0.28 +
+        speechFacePulse * THREE.MathUtils.degToRad(0.24),
+      gazeYaw * 0.16 + emotionOffset.headYaw * 0.25,
+      sway * 0.08 + emotionOffset.headRoll * 0.18 + inquiryTilt * 0.25
     );
     applyBone(
       bones.head,
       restRot.current.head,
-      talkBob * 0.45 + emotionOffset.headPitch + blink * THREE.MathUtils.degToRad(1.4) + speechFacePulse * THREE.MathUtils.degToRad(0.9),
-      gazeYaw * 0.45 + emotionOffset.headYaw,
-      sway * 0.2 + emotionOffset.headRoll + speechFacePulse * THREE.MathUtils.degToRad(0.45)
+      talkBob * 0.28 +
+        nodPulse +
+        emotionOffset.headPitch +
+        blink * THREE.MathUtils.degToRad(0.8) +
+        speechFacePulse * THREE.MathUtils.degToRad(0.42),
+      gazeYaw * 0.32 + emotionOffset.headYaw,
+      sway * 0.12 +
+        emotionOffset.headRoll +
+        inquiryTilt * 0.55 +
+        responseCues.warmth * THREE.MathUtils.degToRad(0.35) +
+        speechFacePulse * THREE.MathUtils.degToRad(0.18)
     );
 
     // Arms and hands: small idle motion, bigger alternating gestures while speaking.
-    const armSwing = Math.sin(t * Math.PI * 2 * 0.35) * THREE.MathUtils.degToRad(3.6);
-    const gestureLift = THREE.MathUtils.degToRad(16) * gesture;
-    const gesturePulse = Math.sin(t * Math.PI * 2 * (0.48 + gesture * 0.2));
-    const gestureOut = THREE.MathUtils.degToRad(10) * gesture * Math.sin(t * Math.PI * 2 * 0.55);
+    const armSwing = Math.sin(t * Math.PI * 2 * 0.28) * THREE.MathUtils.degToRad(1.7);
+    const gestureLift = THREE.MathUtils.degToRad(6.5) * gesture * (0.72 + responseCues.focus * 0.18);
+    const gesturePulse = Math.sin(t * Math.PI * 2 * (0.38 + gesture * 0.12));
+    const gestureOut = THREE.MathUtils.degToRad(4.5) * gesture * Math.sin(t * Math.PI * 2 * 0.42);
     const leftAccent = Math.max(0, gesturePulse);
     const rightAccent = Math.max(0, -gesturePulse);
     applyBone(
       bones.lArm,
       restRot.current.lArm,
       armSwing - gestureLift * (0.46 + leftAccent * 0.34),
-      -gestureOut * 0.25 - THREE.MathUtils.degToRad(7) * leftAccent,
-      gestureOut * 0.35 + THREE.MathUtils.degToRad(6) * leftAccent
+      -gestureOut * 0.2 - THREE.MathUtils.degToRad(2.6) * leftAccent,
+      gestureOut * 0.24 + THREE.MathUtils.degToRad(2.2) * leftAccent
     );
     applyBone(
       bones.rArm,
       restRot.current.rArm,
       -armSwing - gestureLift * (0.46 + rightAccent * 0.34),
-      gestureOut * 0.25 + THREE.MathUtils.degToRad(7) * rightAccent,
-      -gestureOut * 0.35 - THREE.MathUtils.degToRad(6) * rightAccent
+      gestureOut * 0.2 + THREE.MathUtils.degToRad(2.6) * rightAccent,
+      -gestureOut * 0.24 - THREE.MathUtils.degToRad(2.2) * rightAccent
     );
 
     // Forearms: follow-through.
@@ -478,28 +566,28 @@ function AvatarModelInner({
       restRot.current.lFore,
       -gestureLift * (0.18 + leftAccent * 0.22),
       -gestureOut * 0.15,
-      gestureOut * 0.15 + THREE.MathUtils.degToRad(5) * leftAccent
+      gestureOut * 0.1 + THREE.MathUtils.degToRad(2.2) * leftAccent
     );
     applyBone(
       bones.rFore,
       restRot.current.rFore,
       -gestureLift * (0.18 + rightAccent * 0.22),
       gestureOut * 0.15,
-      -gestureOut * 0.15 - THREE.MathUtils.degToRad(5) * rightAccent
+      -gestureOut * 0.1 - THREE.MathUtils.degToRad(2.2) * rightAccent
     );
     applyBone(
       bones.lHand,
       restRot.current.lHand,
-      THREE.MathUtils.degToRad(3.5) * leftAccent,
-      THREE.MathUtils.degToRad(4.5) * leftAccent,
-      THREE.MathUtils.degToRad(7) * leftAccent
+      THREE.MathUtils.degToRad(1.6) * leftAccent,
+      THREE.MathUtils.degToRad(2) * leftAccent,
+      THREE.MathUtils.degToRad(2.8) * leftAccent
     );
     applyBone(
       bones.rHand,
       restRot.current.rHand,
-      THREE.MathUtils.degToRad(3.5) * rightAccent,
-      -THREE.MathUtils.degToRad(4.5) * rightAccent,
-      -THREE.MathUtils.degToRad(7) * rightAccent
+      THREE.MathUtils.degToRad(1.6) * rightAccent,
+      -THREE.MathUtils.degToRad(2) * rightAccent,
+      -THREE.MathUtils.degToRad(2.8) * rightAccent
     );
 
     const visemeJawBias: Partial<Record<VisemeKey, number>> = {
@@ -518,7 +606,7 @@ function AvatarModelInner({
       oh: 0.62,
       ou: 0.4,
     };
-    const jawTarget = THREE.MathUtils.clamp((visemeJawBias[key] ?? 0) * weight * 0.78 + speechEnergy * 0.22, 0, 0.82);
+    const jawTarget = THREE.MathUtils.clamp((visemeJawBias[key] ?? 0) * weight * 0.82 + speechEnergy * 0.18, 0, 0.82);
 
     if (bones.jaw && restRot.current.jaw) {
       bones.jaw.rotation.x = THREE.MathUtils.lerp(
