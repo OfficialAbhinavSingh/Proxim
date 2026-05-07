@@ -111,8 +111,8 @@ export function createWsHandler() {
   ) {
     const elevenKey = process.env.ELEVENLABS_API_KEY;
     const groqKey = process.env.GROQ_API_KEY;
-    // Use per-persona Groq voice, falling back to env var or "tara".
-    const groqVoice = persona.groqVoice ?? process.env.GROQ_TTS_VOICE ?? "tara";
+    // Use per-persona Groq voice, falling back to env var or a valid Orpheus voice.
+    const groqVoice = persona.groqVoice ?? process.env.GROQ_TTS_VOICE ?? "autumn";
 
     let wav: Buffer | null = null;
     let audioBase64: string | null = null;

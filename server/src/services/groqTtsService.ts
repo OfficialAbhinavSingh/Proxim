@@ -3,32 +3,24 @@ import { Buffer } from "node:buffer";
 import type { Emotion } from "../types/index.js";
 
 /**
- * Valid Orpheus v1 English voices from Canopy Labs on Groq.
- * IMPORTANT: The org admin must accept terms at:
- *   https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english
+ * Valid Orpheus v1 English voices currently accepted by Groq.
+ * Older persona configs used tara/leah/leo/dan/mia/zac/jess; keep aliases so
+ * old config values do not break TTS.
  */
 function resolveOrpheusVoice(voice: string): string {
-  const VALID = new Set(["tara", "leah", "leo", "dan", "mia", "zac", "jess", "austin"]);
-  const v = (voice || "tara").toLowerCase();
-  return VALID.has(v) ? v : "tara";
-}
-
-/**
- * Map an Orpheus voice name to the closest PlayAI voice.
- * playai-tts does NOT require terms acceptance.
- */
-function resolvePlayAIVoice(orpheusVoice: string): string {
-  const MAP: Record<string, string> = {
-    tara: "Arista-PlayAI",   // warm female
-    leah: "Nia-PlayAI",      // professional female
-    mia: "Celeste-PlayAI",   // calm female
-    jess: "Ruby-PlayAI",     // expressive female
-    leo: "Angelo-PlayAI",    // assertive male
-    dan: "Mason-PlayAI",     // measured male
-    zac: "Chase-PlayAI",     // confident male
-    austin: "Cillian-PlayAI",// neutral male
+  const aliases: Record<string, string> = {
+    tara: "autumn",
+    leah: "diana",
+    mia: "hannah",
+    jess: "hannah",
+    leo: "austin",
+    dan: "daniel",
+    zac: "troy",
   };
-  return MAP[orpheusVoice.toLowerCase()] ?? "Arista-PlayAI";
+  const valid = new Set(["autumn", "diana", "hannah", "austin", "daniel", "troy"]);
+  const v = (voice || "autumn").toLowerCase();
+  const resolved = aliases[v] ?? v;
+  return valid.has(resolved) ? resolved : "autumn";
 }
 
 function isTermsError(err: unknown): boolean {
@@ -64,25 +56,10 @@ async function tryOrpheusTts(
   voice: string,
   text: string
 ): Promise<Buffer> {
+  const resolvedVoice = resolveOrpheusVoice(voice);
   const res = await client.audio.speech.create({
     model: "canopylabs/orpheus-v1-english",
-    voice: resolveOrpheusVoice(voice),
-    input: text,
-    response_format: "wav",
-  } as Parameters<typeof client.audio.speech.create>[0]);
-  const ab = await res.arrayBuffer();
-  return Buffer.from(ab);
-}
-
-async function tryPlayAITts(
-  client: Groq,
-  voice: string,
-  text: string
-): Promise<Buffer> {
-  const playAIVoice = resolvePlayAIVoice(resolveOrpheusVoice(voice));
-  const res = await client.audio.speech.create({
-    model: "playai-tts",
-    voice: playAIVoice,
+    voice: resolvedVoice,
     input: text,
     response_format: "wav",
   } as Parameters<typeof client.audio.speech.create>[0]);
@@ -91,13 +68,10 @@ async function tryPlayAITts(
 }
 
 /**
- * Synthesise speech using Groq TTS.
+ * Synthesise speech using Groq Orpheus TTS.
  *
- * Priority:
- *   1. Orpheus v1 English (best voice quality, requires terms acceptance)
- *   2. PlayAI TTS        (no terms required, nearly as good)
- *
- * Returns a WAV buffer the browser can decode directly.
+ * Returns a WAV buffer the browser can decode directly. If Orpheus is unavailable
+ * or terms are not accepted, the caller falls back to browser speech.
  */
 export async function synthesizeSentenceToWavWithGroq(
   apiKey: string | undefined,
@@ -110,35 +84,23 @@ export async function synthesizeSentenceToWavWithGroq(
 
   const client = new Groq({ apiKey });
   const spokenText = shapeTextForEmotion(text, emotion);
+  const resolvedVoice = resolveOrpheusVoice(voice);
 
-  // Try Orpheus first.
   try {
-    const buf = await tryOrpheusTts(client, voice, spokenText);
+    const buf = await tryOrpheusTts(client, resolvedVoice, spokenText);
     if (buf.length > 0) {
-      console.log(`[TTS] Groq Orpheus (voice=${resolveOrpheusVoice(voice)}): ${buf.length}B WAV`);
+      console.log(`[TTS] Groq Orpheus (voice=${resolvedVoice}): ${buf.length}B WAV`);
       return buf;
     }
   } catch (err) {
     if (isTermsError(err)) {
       console.warn(
-        "[TTS] Orpheus terms not accepted — falling back to PlayAI TTS.\n" +
-        "      Accept Orpheus at: https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english"
+        "[TTS] Orpheus terms not accepted.\n" +
+          "      Accept Orpheus at: https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english"
       );
     } else {
       console.warn("[TTS] Orpheus failed:", err instanceof Error ? err.message : err);
     }
-  }
-
-  // Fallback: PlayAI TTS (no terms needed).
-  try {
-    const playAIVoice = resolvePlayAIVoice(resolveOrpheusVoice(voice));
-    const buf = await tryPlayAITts(client, voice, spokenText);
-    if (buf.length > 0) {
-      console.log(`[TTS] Groq PlayAI (voice=${playAIVoice}): ${buf.length}B WAV`);
-      return buf;
-    }
-  } catch (err2) {
-    console.warn("[TTS] PlayAI TTS failed:", err2 instanceof Error ? err2.message : err2);
   }
 
   return Buffer.alloc(0);
