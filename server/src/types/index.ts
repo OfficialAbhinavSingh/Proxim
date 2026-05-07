@@ -42,7 +42,7 @@ export interface Persona {
   gender?: "female" | "male";
   avatarUrl: string;
   voiceId: string;
-  /** Groq Orpheus voice name for this persona (tara | leah | leo | dan | mia | zac | jess | austin). */
+  /** Groq Orpheus voice name for this persona (autumn | diana | hannah | austin | daniel | troy). */
   groqVoice?: string;
   systemPrompt: string;
   /** When true, the system prompt includes MLR/off-label compliance guardrails. */
