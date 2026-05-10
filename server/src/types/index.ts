@@ -57,10 +57,29 @@ export interface ScoreItem {
 }
 
 export interface ScoreCard {
-  score: number;          // 0–100
-  readiness: string;      // e.g. "Field Ready", "Almost Ready", "Needs Practice"
+  score: number;
+  readiness: string;
   items: ScoreItem[];
-  summary: string;        // 1-sentence overall coaching note
+  summary: string;
+}
+
+export type ComplianceSeverity = "low" | "medium" | "high";
+
+export interface ComplianceEvent {
+  id: string;
+  turnId: string;
+  ruleId:
+    | "off_label_language"
+    | "unsupported_superiority_claim"
+    | "missing_safety_qualifier"
+    | "absolute_efficacy_claim"
+    | "guaranteed_or_risk_free";
+  title: string;
+  severity: ComplianceSeverity;
+  excerpt: string;
+  rationale: string;
+  suggestion: string;
+  timestamp: number;
 }
 
 export type VisemeSource =
@@ -70,14 +89,16 @@ export type VisemeSource =
   | "fallback_static";
 
 /** Bump when WS payload shape changes (helps detect stale clients/servers during dev). */
-export const WS_PROTOCOL_VERSION = 2;
+export const WS_PROTOCOL_VERSION = 3;
 
 export type WsClientMessage =
   | { type: "session_start"; sessionId: string; personaId: string; patientRequest?: string }
   | { type: "session_end"; sessionId: string }
+  | { type: "interrupt"; sessionId: string; turnId?: string }
   | {
       type: "user_input";
       text: string;
+      turnId: string;
       sessionId: string;
       personaId: string;
       patientRequest?: string;
@@ -91,6 +112,7 @@ export type WsServerMessage =
     }
   | {
       type: "audio_chunk";
+      turnId: string;
       audioBase64: string;
       audioMimeType: string;
       visemes: VisemeKeyframe[];
@@ -98,13 +120,12 @@ export type WsServerMessage =
       emotion?: Emotion;
       isLast: boolean;
       sentenceIndex: number;
-      /** Sentence text — used by client for Web Speech Synthesis TTS fallback */
       text?: string;
-      /** True when this chunk carries only silence (ElevenLabs/Groq TTS unavailable) */
       isSilence?: boolean;
     }
   | {
       type: "transcript_update";
+      turnId: string;
       role: "assistant";
       text: string;
       emotion: Emotion;
@@ -119,21 +140,21 @@ export type WsServerMessage =
   | { type: "session_start"; sessionId: string; personaId: string }
   | { type: "session_end"; sessionId: string }
   | { type: "session_scorecard"; sessionId: string; scoreCard: ScoreCard }
+  | { type: "compliance_event"; sessionId: string; event: ComplianceEvent }
   | {
       type: "video_frame";
-      /** base64-encoded JPEG frame from MuseTalk */
       frameBase64: string;
       sentenceIndex: number;
       frameIndex: number;
     }
   | {
-      /** Dedicated emotion event — sent before the first TTS audio chunk of each turn. */
       type: "emotion";
+      turnId: string;
       tag: Emotion;
     }
   | {
-      /** Server-side pipeline latency breakdown for this turn. */
       type: "latency";
+      turnId: string;
       stt_ms: number;
       llm_first_token_ms: number;
       tts_start_ms: number;
