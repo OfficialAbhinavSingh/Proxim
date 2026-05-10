@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AvatarCanvas } from "./components/AvatarCanvas";
 import { LatencyHud } from "./components/LatencyHud";
 import { SpeakingWaveform } from "./components/SpeakingWaveform";
+import { ComplianceMonitor } from "./components/ComplianceMonitor";
 import { PersonaSelector } from "./components/PersonaSelector";
 import { PatientRequestPanel } from "./components/PatientRequestPanel";
 import { SessionControls } from "./components/SessionControls";
@@ -15,10 +16,12 @@ import { useAudioPlayback } from "./hooks/useAudioPlayback";
 import { useSession } from "./hooks/useSession";
 import { useTheme } from "./hooks/useTheme";
 import { useVoiceInput } from "./hooks/useVoiceInput";
-import { useWebSocket } from "./hooks/useWebSocket";
+import { useProximAvatarSession } from "./sdk/useProximAvatarSession";
 import { useAvatarStore } from "./store/avatarStore";
 import { useSessionStore } from "./store/sessionStore";
 import type { ScoreCard as ScoreCardType } from "./types";
+
+const INTERRUPTIBLE_VOICE_ENABLED = import.meta.env.VITE_ENABLE_BARGE_IN === "true";
 
 export default function App() {
   const {
@@ -38,6 +41,7 @@ export default function App() {
     patientRequest,
     setPatientRequest,
     liveUserTranscript,
+    isGeneratingDebrief,
   } = useSession();
 
   const sidebarOpen = useSessionStore((s) => s.sidebarOpen);
@@ -51,24 +55,13 @@ export default function App() {
   const beginLatencyTurn = useSessionStore((s) => s.beginLatencyTurn);
   const markAudioLatencyIfNeeded = useSessionStore((s) => s.markAudioLatencyIfNeeded);
   const clearLatencyTurn = useSessionStore((s) => s.clearLatencyTurn);
-
-  const {
-    connected,
-    connect,
-    disconnect,
-    send,
-    setOnAudioChunk,
-    setOnTranscriptUpdate,
-    setOnError,
-    setOnScoreCard,
-  } = useWebSocket();
-
-  const prevWsConnected = useRef(false);
+  const clearAssistantStream = useSessionStore((s) => s.clearAssistantStream);
+  const { session, connected, disconnect, setOnError } = useProximAvatarSession();
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [scoreCard, setScoreCard] = useState<ScoreCardType | null>(null);
   const { theme, toggleTheme } = useTheme();
 
-  const { enqueue, ensureCtx, analyserNode, isPlaying: avatarSpeaking } = useAudioPlayback(() => {
+  const { enqueue, ensureCtx, analyserNode, isPlaying: avatarSpeaking, clearQueue, stopCurrent } = useAudioPlayback(() => {
     completeAssistantTurn();
   });
 
@@ -78,28 +71,29 @@ export default function App() {
       setLiveUserTranscript("");
       beginLatencyTurn();
       appendUserMessage(text.trim());
-      send({
-        type: "user_input",
-        text: text.trim(),
-        sessionId,
-        personaId,
-        patientRequest,
-      });
+      session.sendText(text.trim(), { sessionId, personaId, patientRequest });
     },
-    [appendUserMessage, beginLatencyTurn, patientRequest, personaId, send, sessionId, setLiveUserTranscript]
+    [appendUserMessage, beginLatencyTurn, patientRequest, personaId, session, sessionId, setLiveUserTranscript]
   );
 
   const { listening, partialTranscript, mode, startListening, stopListening, tapToSpeak } =
     useVoiceInput({
       enabled: isSessionActive && audioUnlocked,
       avatarSpeaking,
+      interruptAvatarPlayback: INTERRUPTIBLE_VOICE_ENABLED,
+      onInterruptionStart: () => {
+        stopCurrent();
+        clearQueue();
+        clearAssistantStream();
+        session.interrupt();
+      },
       onUtterance: handleUserText,
       onPartial: (text) => setLiveUserTranscript(text),
       onError: (m) => setMicError(m),
     });
 
   useEffect(() => {
-    setOnAudioChunk((chunk) => {
+    const offAudio = session.onAudioChunk((chunk) => {
       // Diagnostics: record chunk metadata as soon as it arrives (playback may start later).
       const receivedAt = performance.now();
       useAvatarStore.getState().setLastChunkMeta({
@@ -123,27 +117,13 @@ export default function App() {
         receivedAt,
       });
     });
-    setOnTranscriptUpdate(() => {
-      /* streaming text handled in store via useWebSocket */
-    });
     setOnError((m) => setMicError(m));
-    setOnScoreCard((card) => setScoreCard(card));
-  }, [enqueue, markAudioLatencyIfNeeded, setOnAudioChunk, setOnError, setOnScoreCard, setOnTranscriptUpdate]);
-
-  useEffect(() => {
-    const sid = useSessionStore.getState().sessionId;
-    const pid = useSessionStore.getState().personaId;
-    const active = useSessionStore.getState().isSessionActive;
-    if (connected && !prevWsConnected.current && active && sid && pid) {
-      send({
-        type: "session_start",
-        sessionId: sid,
-        personaId: pid,
-        patientRequest: useSessionStore.getState().patientRequest,
-      });
-    }
-    prevWsConnected.current = connected;
-  }, [connected, send]);
+    const offScorecard = session.onScorecard((card) => setScoreCard(card));
+    return () => {
+      offAudio();
+      offScorecard();
+    };
+  }, [enqueue, markAudioLatencyIfNeeded, session, setOnError, setMicError]);
 
   const handleStart = async () => {
     if (!personaId) return;
@@ -153,15 +133,18 @@ export default function App() {
     await ensureCtx();
     setAudioUnlocked(true);
     startSession();
-    connect();
+    session.startSession({
+      sessionId: useSessionStore.getState().sessionId ?? "",
+      personaId,
+      patientRequest: useSessionStore.getState().patientRequest,
+    });
     void startListening();
   };
 
   const handleEnd = () => {
     const sid = sessionId;
-    if (sid) send({ type: "session_end", sessionId: sid });
+    if (sid) session.endSession(sid);
     stopListening();
-    disconnect();
     clearLatencyTurn();
     setLiveUserTranscript("");
     endSession();
@@ -196,6 +179,7 @@ export default function App() {
               active={isSessionActive}
               elapsedSec={elapsedSec}
               canStart={!!personaId && !isSessionActive}
+              generatingDebrief={isGeneratingDebrief}
               onStart={handleStart}
               onEnd={handleEnd}
             />
@@ -340,6 +324,7 @@ export default function App() {
             messages={messages}
             streamingAssistant={assistantStreamingText}
             liveUserTranscript={liveUserTranscript}
+            footer={<ComplianceMonitor />}
           />
         ) : null}
       </main>
