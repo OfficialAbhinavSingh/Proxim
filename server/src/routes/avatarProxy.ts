@@ -6,6 +6,8 @@ import { join } from "node:path";
 export const avatarProxyRouter = Router();
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+const avatarPublicDir =
+  process.env.AVATAR_PUBLIC_DIR ?? join(process.cwd(), "..", "client", "public", "avatars");
 
 /**
  * Upload a local avatar GLB so the client can load it from localhost even when external CDNs are blocked.
@@ -28,12 +30,11 @@ avatarProxyRouter.post("/upload-avatar", upload.single("file"), async (req, res)
 
     // Write into the Vite public folder so the client can fetch it directly.
     // Repo layout: server/src/routes -> ../../.. -> repo root -> client/public/avatars
-    const publicDir = join(process.cwd(), "..", "client", "public", "avatars");
-    mkdirSync(publicDir, { recursive: true });
+    mkdirSync(avatarPublicDir, { recursive: true });
     const personaId = typeof req.body?.personaId === "string" ? req.body.personaId : "";
     const safePersonaId = personaId.replace(/[^a-z0-9_-]/gi, "").slice(0, 80);
     const filename = safePersonaId ? `uploaded-avatar-${safePersonaId}.glb` : "uploaded-avatar.glb";
-    const targetPath = join(publicDir, filename);
+    const targetPath = join(avatarPublicDir, filename);
     writeFileSync(targetPath, file.buffer);
 
     res.json({ url: `/avatars/${filename}` });

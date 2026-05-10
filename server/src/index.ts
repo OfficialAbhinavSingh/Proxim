@@ -10,6 +10,9 @@ import { createWsHandler } from "./websocket/wsHandler.js";
 import { WS_PROTOCOL_VERSION } from "./types/index.js";
 
 const app = express();
+const avatarPublicDir =
+  process.env.AVATAR_PUBLIC_DIR ?? join(process.cwd(), "..", "client", "public", "avatars");
+
 app.use(
   cors({
     origin: true,
@@ -17,7 +20,7 @@ app.use(
   })
 );
 app.use(express.json({ limit: "2mb" }));
-app.use("/avatars", express.static(join(process.cwd(), "..", "client", "public", "avatars")));
+app.use("/avatars", express.static(avatarPublicDir));
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "proxim-server" });
