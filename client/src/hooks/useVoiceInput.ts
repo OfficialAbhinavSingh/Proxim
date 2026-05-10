@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const SILENCE_MS_WEBSPEECH = 240;
-const FAST_FINAL_SUBMIT_MS = 140;
+const SILENCE_MS_WEBSPEECH = 900;
+const FAST_FINAL_SUBMIT_MS = 450;
 const PCM_SAMPLE_RATE = 16_000;
 const PCM_SPEECH_THRESHOLD = 0.0025;
 const PCM_PEAK_THRESHOLD = 0.035;
-const PCM_SILENCE_FRAMES = 3;
+const PCM_SILENCE_FRAMES = 6;
 const PCM_MIN_SPEECH_FRAMES = 3;
 const PCM_ROLLING_MAX_FRAMES = 320;
 const PCM_MAX_FRAMES = 160;
@@ -44,9 +44,11 @@ function encodeWav(samples: Float32Array, sampleRate: number): Blob {
 export interface UseVoiceInputOptions {
   enabled: boolean;
   avatarSpeaking?: boolean;
+  interruptAvatarPlayback?: boolean;
   onUtterance: (text: string) => void;
   onPartial?: (text: string) => void;
   onError?: (message: string) => void;
+  onInterruptionStart?: () => void;
 }
 
 type InputMode = "webspeech" | "server_stt" | "unsupported";
@@ -54,9 +56,11 @@ type InputMode = "webspeech" | "server_stt" | "unsupported";
 export function useVoiceInput({
   enabled,
   avatarSpeaking = false,
+  interruptAvatarPlayback = false,
   onUtterance,
   onPartial,
   onError,
+  onInterruptionStart,
 }: UseVoiceInputOptions) {
   const [listening, setListening] = useState(false);
   const [partialTranscript, setPartialTranscript] = useState("");
@@ -91,15 +95,24 @@ export function useVoiceInput({
   const onUtteranceRef = useRef(onUtterance);
   const onErrorRef = useRef(onError);
   const onPartialRef = useRef(onPartial);
+  const onInterruptionStartRef = useRef(onInterruptionStart);
+  const interruptionTriggeredRef = useRef(false);
 
   useEffect(() => {
     onUtteranceRef.current = onUtterance;
     onErrorRef.current = onError;
     onPartialRef.current = onPartial;
-  }, [onUtterance, onError, onPartial]);
+    onInterruptionStartRef.current = onInterruptionStart;
+  }, [onUtterance, onError, onPartial, onInterruptionStart]);
+
+  const triggerInterruptionIfNeeded = useCallback(() => {
+    if (!interruptAvatarPlayback || !avatarSpeaking || interruptionTriggeredRef.current) return;
+    interruptionTriggeredRef.current = true;
+    onInterruptionStartRef.current?.();
+  }, [avatarSpeaking, interruptAvatarPlayback]);
 
   useEffect(() => {
-    if (avatarSpeaking) {
+    if (avatarSpeaking && !interruptAvatarPlayback) {
       if (cooldownTimerRef.current) { clearTimeout(cooldownTimerRef.current); cooldownTimerRef.current = null; }
       if (fastSubmitTimerRef.current) {
         clearTimeout(fastSubmitTimerRef.current);
@@ -115,16 +128,21 @@ export function useVoiceInput({
       onPartialRef.current?.("");
       setPartialTranscript("");
     } else {
-      cooldownTimerRef.current = setTimeout(() => {
+      interruptionTriggeredRef.current = false;
+      if (interruptAvatarPlayback) {
         mutedRef.current = false;
-        cooldownTimerRef.current = null;
-        log("mic unmuted after post-speak cooldown");
-      }, POST_SPEAK_COOLDOWN_MS);
+      } else {
+        cooldownTimerRef.current = setTimeout(() => {
+          mutedRef.current = false;
+          cooldownTimerRef.current = null;
+          log("mic unmuted after post-speak cooldown");
+        }, POST_SPEAK_COOLDOWN_MS);
+      }
     }
     return () => {
       if (cooldownTimerRef.current) { clearTimeout(cooldownTimerRef.current); cooldownTimerRef.current = null; }
     };
-  }, [avatarSpeaking]);
+  }, [avatarSpeaking, interruptAvatarPlayback]);
 
   const reportError = useCallback((msg: string) => {
     logErr(msg);
@@ -207,6 +225,7 @@ export function useVoiceInput({
     rec.lang = "en-US";
 
     rec.onspeechstart = () => {
+      triggerInterruptionIfNeeded();
       if (!lastTextRef.current.trim()) {
         setPartialTranscript("Listening...");
         onPartialRef.current?.("Listening...");
@@ -227,6 +246,7 @@ export function useVoiceInput({
       }
       const combined = `${committedTextRef.current} ${interim}`.trim();
       if (!combined) return;
+      triggerInterruptionIfNeeded();
       lastTextRef.current = combined;
       setPartialTranscript(combined);
       onPartialRef.current?.(combined);
@@ -250,7 +270,7 @@ export function useVoiceInput({
       partialRecognitionRef.current = null;
       return false;
     }
-  }, [getSpeechRecognitionCtor, scheduleFastSubmit]);
+  }, [getSpeechRecognitionCtor, scheduleFastSubmit, triggerInterruptionIfNeeded]);
 
   const transcribeBlob = useCallback(async (blob: Blob, label = "") => {
     const api = import.meta.env.VITE_API_URL ?? "http://localhost:3001";
@@ -423,6 +443,7 @@ export function useVoiceInput({
         if (rms > PCM_SPEECH_THRESHOLD || peak > PCM_PEAK_THRESHOLD) {
           if (!pcmSpeakingRef.current) {
             log(`speech start (rms=${rms.toFixed(4)} peak=${peak.toFixed(4)})`);
+            triggerInterruptionIfNeeded();
           }
           pcmSpeakingRef.current = true;
           pcmSilenceFramesRef.current = 0;
@@ -454,7 +475,7 @@ export function useVoiceInput({
       setListening(false);
       setMode("unsupported");
     }
-  }, [flushPcmBuffer, reportError, startPartialWebSpeech]);
+  }, [flushPcmBuffer, reportError, startPartialWebSpeech, triggerInterruptionIfNeeded]);
 
   const scheduleUtteranceEnd = useCallback((text: string) => {
     clearSilenceTimer();
@@ -500,6 +521,7 @@ export function useVoiceInput({
     rec.lang = "en-US";
 
     rec.onspeechstart = () => {
+      triggerInterruptionIfNeeded();
       if (!lastTextRef.current.trim()) {
         setPartialTranscript("Listening...");
         onPartialRef.current?.("Listening...");
@@ -519,6 +541,7 @@ export function useVoiceInput({
       }
       const combined = `${committedTextRef.current} ${interim}`.trim();
       if (combined) {
+        triggerInterruptionIfNeeded();
         setPartialTranscript(combined);
         onPartialRef.current?.(combined);
         scheduleUtteranceEnd(combined);
@@ -552,7 +575,7 @@ export function useVoiceInput({
       reportError(e instanceof Error ? e.message : "Could not start speech recognition");
       return false;
     }
-  }, [getSpeechRecognitionCtor, reportError, scheduleUtteranceEnd, startPcmWhisperPipeline]);
+  }, [getSpeechRecognitionCtor, reportError, scheduleUtteranceEnd, startPcmWhisperPipeline, triggerInterruptionIfNeeded]);
 
   const stopListening = useCallback(() => {
     log("stopListening");

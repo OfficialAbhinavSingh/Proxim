@@ -110,6 +110,8 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
   const [isPlaying, setIsPlaying] = useState(false);
   // Cancel any pending Web Speech utterance when a new chunk starts.
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const sourceRef = useRef<AudioBufferSourceNode | null>(null);
+  const stopRequestedRef = useRef(false);
 
   const ensureCtx = useCallback(async () => {
     let ctx = ctxRef.current;
@@ -214,6 +216,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
     if (!next) return;
     playingRef.current = true;
     setIsPlaying(true);
+    stopRequestedRef.current = false;
 
     try {
       if (next.isSilence && next.text?.trim()) {
@@ -242,9 +245,13 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
         const buffer = await ctx.decodeAudioData(copy);
         await new Promise<void>((resolve) => {
           const src = ctx.createBufferSource();
+          sourceRef.current = src;
           src.buffer = buffer;
           src.connect(out);
-          src.onended = () => resolve();
+          src.onended = () => {
+            sourceRef.current = null;
+            resolve();
+          };
           // One render frame of lead time keeps lip motion visibly aligned while staying well under 300ms.
           const leadSec = 0.016;
           const when = ctx.currentTime + leadSec;
@@ -286,10 +293,14 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
 
     playingRef.current = false;
 
-    if (next.isLast) {
+    if (!stopRequestedRef.current && next.isLast) {
       setIsPlaying(false);
       useAvatarStore.getState().clearVisemeTrack();
       onLastChunkEnded?.();
+    }
+
+    if (stopRequestedRef.current) {
+      setIsPlaying(false);
     }
 
     // Process next item in queue.
@@ -304,5 +315,27 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
     [pump]
   );
 
-  return { enqueue, ensureCtx, analyserNode, isPlaying };
+  const clearQueue = useCallback(() => {
+    queueRef.current = [];
+  }, []);
+
+  const stopCurrent = useCallback(() => {
+    stopRequestedRef.current = true;
+    queueRef.current = [];
+    try {
+      sourceRef.current?.stop();
+    } catch {
+      // ignore stop races
+    }
+    sourceRef.current = null;
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    utteranceRef.current = null;
+    playingRef.current = false;
+    setIsPlaying(false);
+    useAvatarStore.getState().clearVisemeTrack();
+  }, []);
+
+  return { enqueue, ensureCtx, analyserNode, isPlaying, clearQueue, stopCurrent };
 }

@@ -23,6 +23,9 @@ export function useSession() {
   const assistantStreamingText = useSessionStore((s) => s.assistantStreamingText);
   const currentEmotion = useSessionStore((s) => s.currentEmotion);
   const liveUserTranscript = useSessionStore((s) => s.liveUserTranscript);
+  const isGeneratingDebrief = useSessionStore((s) => s.isGeneratingDebrief);
+  const setGeneratingDebrief = useSessionStore((s) => s.setGeneratingDebrief);
+  const clearComplianceEvents = useSessionStore((s) => s.clearComplianceEvents);
 
   const [elapsedSec, setElapsedSec] = useState(0);
 
@@ -46,7 +49,9 @@ export function useSession() {
     setSessionActive(true);
     setStartedAt(Date.now());
     clearAssistantStream();
-  }, [clearAssistantStream, setSessionActive, setSessionId, setStartedAt]);
+    setGeneratingDebrief(false);
+    clearComplianceEvents();
+  }, [clearAssistantStream, clearComplianceEvents, setGeneratingDebrief, setSessionActive, setSessionId, setStartedAt]);
 
   const endSession = useCallback(() => {
     setSessionActive(false);
@@ -94,5 +99,7 @@ export function useSession() {
     assistantStreamingText,
     currentEmotion,
     liveUserTranscript,
+    isGeneratingDebrief,
+    setGeneratingDebrief,
   };
 }
