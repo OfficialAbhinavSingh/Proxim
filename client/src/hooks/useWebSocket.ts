@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Emotion, ScoreCard, VisemeKeyframe, VisemeSource, WsClientMessage, WsServerMessage } from "../types";
-
+import type {
+  ComplianceEvent,
+  Emotion,
+  ScoreCard,
+  VisemeKeyframe,
+  VisemeSource,
+  WsClientMessage,
+  WsServerMessage,
+} from "../types";
 import { useSessionStore } from "../store/sessionStore";
 
 const WS_URL = import.meta.env.VITE_WS_URL ?? "ws://localhost:3001";
 
 export interface AudioChunkPayload {
+  turnId: string;
   audioBase64: string;
   audioMimeType: string;
   visemes: VisemeKeyframe[];
@@ -13,9 +21,7 @@ export interface AudioChunkPayload {
   emotion?: Emotion;
   isLast: boolean;
   sentenceIndex: number;
-  /** Sentence text for Web Speech Synthesis fallback */
   text?: string;
-  /** True when server sent silence (TTS providers unavailable) */
   isSilence?: boolean;
 }
 
@@ -27,9 +33,10 @@ export function useWebSocket() {
   const [connected, setConnected] = useState(false);
   const connectAttemptRef = useRef(0);
   const onAudioChunkRef = useRef<(p: AudioChunkPayload) => void>(() => {});
-  const onTranscriptRef = useRef<(text: string, emotion: Emotion) => void>(() => {});
+  const onTranscriptRef = useRef<(payload: { turnId: string; text: string; emotion: Emotion }) => void>(() => {});
   const onErrorRef = useRef<(msg: string) => void>(() => {});
   const onScoreCardRef = useRef<(card: ScoreCard) => void>(() => {});
+  const onComplianceEventRef = useRef<(event: ComplianceEvent) => void>(() => {});
 
   const setCurrentEmotion = useSessionStore((s) => s.setCurrentEmotion);
   const clearAssistantStream = useSessionStore((s) => s.clearAssistantStream);
@@ -40,12 +47,9 @@ export function useWebSocket() {
   const setServerLatency = useSessionStore((s) => s.setServerLatency);
 
   const candidateUrls = useCallback((): string[] => {
-    const base = WS_URL;
-    const out = [base];
-    // Windows networks often resolve `localhost` to IPv6 (::1). If the server is only reachable
-    // on IPv4, the WS handshake fails. Auto-fallback to 127.0.0.1.
-    if (/^ws:\/\/localhost(:\d+)?/i.test(base)) {
-      out.push(base.replace(/^ws:\/\/localhost/i, "ws://127.0.0.1"));
+    const out = [WS_URL];
+    if (/^ws:\/\/localhost(:\d+)?/i.test(WS_URL)) {
+      out.push(WS_URL.replace(/^ws:\/\/localhost/i, "ws://127.0.0.1"));
     }
     return Array.from(new Set(out));
   }, []);
@@ -57,6 +61,7 @@ export function useWebSocket() {
       clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
     }
+
     const urls = candidateUrls();
     const attempt = connectAttemptRef.current % urls.length;
     const url = urls[attempt];
@@ -65,36 +70,39 @@ export function useWebSocket() {
     let opened = false;
     const ws = new WebSocket(url);
     wsRef.current = ws;
+
     ws.onopen = () => {
       opened = true;
       reconnectAttemptRef.current = 0;
       setConnected(true);
     };
+
     ws.onclose = () => {
       setConnected(false);
       wsRef.current = null;
       setWsProtocolVersion(null);
-      // If we never opened and we have a fallback URL, try it once automatically.
       if (!opened && urls.length > 1 && attempt === 0) {
         onErrorRef.current(`WebSocket failed at ${url}, retrying ${urls[1]}...`);
-        // Re-attempt with next candidate.
         queueMicrotask(() => connect());
         return;
       }
-      const active = useSessionStore.getState().isSessionActive;
-      if (!intentionalCloseRef.current && active && opened && reconnectAttemptRef.current < 8) {
+
+      const state = useSessionStore.getState();
+      if (!intentionalCloseRef.current && (state.isSessionActive || state.isGeneratingDebrief) && opened && reconnectAttemptRef.current < 8) {
         reconnectAttemptRef.current += 1;
         const delay = Math.min(10_000, 600 * reconnectAttemptRef.current);
         reconnectTimerRef.current = setTimeout(() => {
           reconnectTimerRef.current = null;
           connect();
         }, delay);
-        onErrorRef.current(`WebSocket disconnected — reconnecting (${reconnectAttemptRef.current}/8)…`);
+        onErrorRef.current(`WebSocket disconnected - reconnecting (${reconnectAttemptRef.current}/8)...`);
       }
     };
+
     ws.onerror = () => {
       onErrorRef.current(`WebSocket connection error (${url})`);
     };
+
     ws.onmessage = (ev) => {
       try {
         const data = JSON.parse(String(ev.data)) as WsServerMessage;
@@ -108,6 +116,7 @@ export function useWebSocket() {
         }
         if (data.type === "audio_chunk") {
           onAudioChunkRef.current({
+            turnId: data.turnId,
             audioBase64: data.audioBase64,
             audioMimeType: data.audioMimeType,
             visemes: data.visemes,
@@ -132,7 +141,7 @@ export function useWebSocket() {
           setCurrentEmotion(data.emotion);
           markLlmLatencyIfNeeded(data.text);
           setAssistantStreamingText(data.text);
-          onTranscriptRef.current(data.text, data.emotion);
+          onTranscriptRef.current({ turnId: data.turnId, text: data.text, emotion: data.emotion });
           return;
         }
         if (data.type === "session_end") {
@@ -143,8 +152,11 @@ export function useWebSocket() {
           onScoreCardRef.current(data.scoreCard);
           return;
         }
+        if (data.type === "compliance_event") {
+          onComplianceEventRef.current(data.event);
+          return;
+        }
         if (data.type === "emotion") {
-          // Dedicated emotion event — fires BEFORE first TTS audio chunk.
           setCurrentEmotion(data.tag);
           return;
         }
@@ -156,9 +168,8 @@ export function useWebSocket() {
             total_ms: data.total_ms,
           });
           console.log(
-            `[Latency] Server reported — LLM: ${data.llm_first_token_ms}ms, TTS: ${data.tts_start_ms}ms, Total: ${data.total_ms}ms`
+            `[Latency] Server reported - LLM: ${data.llm_first_token_ms}ms, TTS: ${data.tts_start_ms}ms, Total: ${data.total_ms}ms`
           );
-          return;
         }
       } catch {
         onErrorRef.current("Invalid message from server");
@@ -167,12 +178,12 @@ export function useWebSocket() {
   }, [
     candidateUrls,
     clearAssistantStream,
-    setAssistantStreamingText,
     markLlmLatencyIfNeeded,
+    setAssistantStreamingText,
     setCapabilities,
     setCurrentEmotion,
-    setWsProtocolVersion,
     setServerLatency,
+    setWsProtocolVersion,
   ]);
 
   const disconnect = useCallback(() => {
@@ -201,12 +212,9 @@ export function useWebSocket() {
     onAudioChunkRef.current = fn;
   }, []);
 
-  const setOnTranscriptUpdate = useCallback(
-    (fn: (text: string, emotion: Emotion) => void) => {
-      onTranscriptRef.current = fn;
-    },
-    []
-  );
+  const setOnTranscriptUpdate = useCallback((fn: (payload: { turnId: string; text: string; emotion: Emotion }) => void) => {
+    onTranscriptRef.current = fn;
+  }, []);
 
   const setOnError = useCallback((fn: (msg: string) => void) => {
     onErrorRef.current = fn;
@@ -216,9 +224,11 @@ export function useWebSocket() {
     onScoreCardRef.current = fn;
   }, []);
 
-  useEffect(() => {
-    return () => disconnect();
-  }, [disconnect]);
+  const setOnComplianceEvent = useCallback((fn: (event: ComplianceEvent) => void) => {
+    onComplianceEventRef.current = fn;
+  }, []);
+
+  useEffect(() => () => disconnect(), [disconnect]);
 
   return {
     connected,
@@ -229,5 +239,6 @@ export function useWebSocket() {
     setOnTranscriptUpdate,
     setOnError,
     setOnScoreCard,
+    setOnComplianceEvent,
   };
 }

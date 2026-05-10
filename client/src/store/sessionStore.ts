@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Emotion, Message, Persona } from "../types";
+import type { ComplianceEvent, Emotion, Message, Persona } from "../types";
 
 export interface SessionState {
   sessionId: string | null;
@@ -10,8 +10,10 @@ export interface SessionState {
   patientRequest: string;
   liveUserTranscript: string;
   assistantStreamingText: string;
+  complianceEvents: ComplianceEvent[];
   currentEmotion: Emotion;
   micError: string | null;
+  isGeneratingDebrief: boolean;
   /** User has performed a gesture that unlocks audio (mobile autoplay). */
   audioUnlocked: boolean;
   sidebarOpen: boolean;
@@ -49,9 +51,12 @@ export interface SessionState {
   setAssistantStreamingText: (t: string) => void;
   clearAssistantStream: () => void;
   finalizeAssistantMessage: (content: string, emotion?: Emotion) => void;
+  addComplianceEvent: (event: ComplianceEvent) => void;
+  clearComplianceEvents: () => void;
   setLiveUserTranscript: (t: string) => void;
   setCurrentEmotion: (e: Emotion) => void;
   setMicError: (e: string | null) => void;
+  setGeneratingDebrief: (v: boolean) => void;
   setAudioUnlocked: (v: boolean) => void;
   toggleSidebar: () => void;
   setCapabilities: (c: SessionState["capabilities"]) => void;
@@ -74,8 +79,10 @@ export const useSessionStore = create<SessionState>((set) => ({
   patientRequest: "",
   liveUserTranscript: "",
   assistantStreamingText: "",
+  complianceEvents: [],
   currentEmotion: "neutral",
   micError: null,
+  isGeneratingDebrief: false,
   audioUnlocked: false,
   sidebarOpen: true,
   wsProtocolVersion: null,
@@ -110,9 +117,13 @@ export const useSessionStore = create<SessionState>((set) => ({
       ],
       assistantStreamingText: "",
     })),
+  addComplianceEvent: (event) =>
+    set((s) => ({ complianceEvents: [event, ...s.complianceEvents].slice(0, 20) })),
+  clearComplianceEvents: () => set({ complianceEvents: [] }),
   setLiveUserTranscript: (liveUserTranscript) => set({ liveUserTranscript }),
   setCurrentEmotion: (currentEmotion) => set({ currentEmotion }),
   setMicError: (micError) => set({ micError }),
+  setGeneratingDebrief: (isGeneratingDebrief) => set({ isGeneratingDebrief }),
   setAudioUnlocked: (audioUnlocked) => set({ audioUnlocked }),
   toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
   setCapabilities: (capabilities) => set({ capabilities }),
@@ -152,8 +163,10 @@ export const useSessionStore = create<SessionState>((set) => ({
       patientRequest: "",
       liveUserTranscript: "",
       assistantStreamingText: "",
+      complianceEvents: [],
       currentEmotion: "neutral",
       micError: null,
+      isGeneratingDebrief: false,
       wsProtocolVersion: null,
       capabilities: {
         alignmentAvailable: null,
