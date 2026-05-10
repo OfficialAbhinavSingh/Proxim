@@ -1,4 +1,5 @@
 import type { Message } from "../types";
+import type { ReactNode } from "react";
 
 interface TranscriptProps {
   open: boolean;
@@ -6,6 +7,7 @@ interface TranscriptProps {
   messages: Message[];
   streamingAssistant: string;
   liveUserTranscript?: string;
+  footer?: ReactNode;
 }
 
 export function Transcript({
@@ -14,6 +16,7 @@ export function Transcript({
   messages,
   streamingAssistant,
   liveUserTranscript,
+  footer,
 }: TranscriptProps) {
   return (
     <aside
@@ -78,6 +81,7 @@ export function Transcript({
           </div>
         ) : null}
       </div>
+      {footer}
     </aside>
   );
 }

@@ -20,6 +20,9 @@ The project is built to match the Proxa Echo integration model: React front end,
 - Five distinct HCP personas with different specialties, moods, and compliance styles
 - Browser-rendered 3D avatar animation with lip sync and emotional motion cues
 - Session-end scorecard for coaching and objection-handling review
+- Reliable post-call debrief delivery with a scorecard wait state
+- Real-time compliance flagging for risky rep phrasing
+- Interruptible voice-to-voice turns for natural barge-in
 - Containerizable client/server deployment
 
 ## Architecture Overview
@@ -176,6 +179,42 @@ When the session ends, the conversation is evaluated across categories such as:
 - safety messaging
 - dosing accuracy
 - compliance language
+
+The client now keeps the session transport alive briefly after `End Call` so the debrief can arrive reliably. If scoring fails or times out, the UI still falls back safely to the non-scorecard end state.
+
+### Live compliance monitor
+
+During a live session, rep messages are scanned immediately for rule-based concerns such as:
+
+- off-label language
+- unsupported superiority claims
+- benefit claims without safety qualifiers
+- absolute efficacy claims
+- "guaranteed" or "risk-free" phrasing
+
+Flags stream into a sidebar compliance monitor without blocking the physician response loop.
+
+### Interruptible voice sessions
+
+Assistant turns now carry turn IDs and can be interrupted mid-playback. When the user speaks over the avatar, the client can stop queued audio, clear the current turn, notify the server, and continue with the new utterance while preserving the safer mic-mute fallback mode in code.
+
+## React Integration API
+
+The client also exposes an internal React-facing session API under `client/src/sdk/` so the WebSocket protocol is not tied directly to the demo UI.
+
+Current surface:
+
+- `startSession(config)`
+- `sendText(text, config)`
+- `sendAudio(blob, config)`
+- `interrupt()`
+- `endSession(sessionId)`
+- `onTranscript(handler)`
+- `onAudioChunk(handler)`
+- `onComplianceEvent(handler)`
+- `onScorecard(handler)`
+
+The reference app uses this SDK internally today, and another React app can adopt the same surface by composing `useProximAvatarSession()` and rendering its own UI around those callbacks.
 
 ## Environment Reference
 
