@@ -1,4 +1,16 @@
 services:
+  client:
+    build:
+      context: .
+      dockerfile: Dockerfile.client
+      args:
+        VITE_WS_URL: ws://localhost:3001
+        VITE_API_URL: http://localhost:3001
+        VITE_HTTP_SERVER_URL: http://localhost:3001
+    ports:
+      - "8080:80"
+    depends_on:
+      - server
   server:
     build:
       context: .
@@ -10,3 +22,4 @@ services:
     environment:
       - PORT=3001
       - PERSONAS_PATH=/app/dist/config/personas.json
+      - AVATAR_PUBLIC_DIR=/app/public/avatars
