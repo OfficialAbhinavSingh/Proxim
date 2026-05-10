@@ -2,13 +2,21 @@ import type { WebSocket } from "ws";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Emotion, Message, Persona, WsClientMessage, WsServerMessage } from "../types/index.js";
+import type { ComplianceEvent, Emotion, Message, Persona, WsClientMessage, WsServerMessage } from "../types/index.js";
 import { streamClaudeResponse, stripEmotionTag, generateScoreCard } from "../services/claudeService.js";
 import { synthesizeSentenceWithTimestamps } from "../services/elevenLabsService.js";
 import { synthesizeSentenceToWavWithGroq } from "../services/groqTtsService.js";
-import { alignVisemesToWavEnergy, bufferToBase64, makeSilenceWavForDuration, minimalSilenceWav, parseWavDurationSec, scaleVisemesToDuration } from "../services/audioService.js";
+import {
+  alignVisemesToWavEnergy,
+  bufferToBase64,
+  makeSilenceWavForDuration,
+  minimalSilenceWav,
+  parseWavDurationSec,
+  scaleVisemesToDuration,
+} from "../services/audioService.js";
 import { synthesizeVisemesFromText } from "../services/visemeFallbackService.js";
 import { streamMuseTalkFrames } from "../services/museTalkService.js";
+import { scanCompliance } from "../services/complianceService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -20,13 +28,19 @@ function loadPersonas(): Persona[] {
   return JSON.parse(raw) as Persona[];
 }
 
+interface ActiveTurnCtx {
+  turnId: string;
+  cancelled: boolean;
+}
+
 interface SessionCtx {
   personaId: string;
   messages: Message[];
   patientRequest: string;
+  complianceEvents: ComplianceEvent[];
+  activeTurn: ActiveTurnCtx | null;
 }
 
-/** Per-turn latency tracking. */
 interface LatencyCtx {
   t0: number;
   llmFirstTokenMs: number | null;
@@ -50,15 +64,9 @@ function cleanPatientRequest(value: unknown): string {
   return value.trim().slice(0, 1600);
 }
 
-/**
- * Split the leading complete sentence from the buffer.
- * Fires on: `.!?` (sentence end) or `,` after ≥6 words (clause boundary).
- * Keeps latency low by not waiting for the full paragraph.
- */
 function splitLeadingSentence(buffer: string): { sentence: string | null; rest: string } {
   const trimmed = buffer.trimStart();
 
-  // Hard sentence boundary: . ! ?
   const sentencePunct = /([.!?])(\s|$)/;
   const sm = sentencePunct.exec(trimmed);
   if (sm && sm.index !== undefined) {
@@ -68,7 +76,6 @@ function splitLeadingSentence(buffer: string): { sentence: string | null; rest: 
     if (sentence.length >= 4) return { sentence, rest };
   }
 
-  // Clause boundary: comma after ≥6 words — fire TTS while LLM continues.
   const commaIdx = trimmed.indexOf(",");
   if (commaIdx > 0) {
     const before = trimmed.slice(0, commaIdx).trim();
@@ -80,7 +87,6 @@ function splitLeadingSentence(buffer: string): { sentence: string | null; rest: 
     }
   }
 
-  // Absolute length cap: avoid waiting forever when LLM omits punctuation.
   if (trimmed.length >= 100) {
     const slice = trimmed.slice(0, 100);
     const li = slice.lastIndexOf(" ");
@@ -92,6 +98,10 @@ function splitLeadingSentence(buffer: string): { sentence: string | null; rest: 
   }
 
   return { sentence: null, rest: buffer };
+}
+
+function isTurnCancelled(turn: ActiveTurnCtx) {
+  return turn.cancelled;
 }
 
 export function createWsHandler() {
@@ -107,31 +117,31 @@ export function createWsHandler() {
     sentenceIndex: number,
     isLast: boolean,
     emotion: Emotion,
-    latency: LatencyCtx
+    latency: LatencyCtx,
+    turn: ActiveTurnCtx
   ) {
+    if (isTurnCancelled(turn)) return;
+
     const elevenKey = process.env.ELEVENLABS_API_KEY;
     const groqKey = process.env.GROQ_API_KEY;
-    // Use per-persona Groq voice, falling back to env var or a valid Orpheus voice.
     const groqVoice = persona.groqVoice ?? process.env.GROQ_TTS_VOICE ?? "autumn";
 
     let wav: Buffer | null = null;
     let audioBase64: string | null = null;
-    let audioMimeType: string = "audio/wav";
+    let audioMimeType = "audio/wav";
     let isSilence = false;
     let visemes = synthesizeVisemesFromText(sentence);
     let visemeSource: "elevenlabs_alignment" | "fallback_audio" | "fallback_text" | "fallback_static" = "fallback_text";
 
-    // Record tts_start on first sentence synthesis.
     if (latency.ttsStartMs === null) {
       latency.ttsStartMs = Date.now() - latency.t0;
       console.log(`[Latency] TTS start: ${latency.ttsStartMs}ms`);
     }
 
-    // ── TTS priority: ElevenLabs (audio-aligned visemes) → Groq Orpheus (fallback) ──
     if (elevenKey) {
       try {
         const res = await synthesizeSentenceWithTimestamps(elevenKey, persona.voiceId, sentence, emotion);
-        if (res.audioBase64) {
+        if (!isTurnCancelled(turn) && res.audioBase64) {
           audioBase64 = res.audioBase64;
           audioMimeType = res.audioMimeType;
           visemes = res.visemes;
@@ -143,19 +153,14 @@ export function createWsHandler() {
       }
     }
 
-    // Groq Orpheus fallback — per-persona voice assignment.
-    if (!audioBase64 && groqKey) {
+    if (!audioBase64 && groqKey && !isTurnCancelled(turn)) {
       try {
         const groqWav = await synthesizeSentenceToWavWithGroq(groqKey, groqVoice, sentence, emotion);
-        if (groqWav.length > 0) {
+        if (!isTurnCancelled(turn) && groqWav.length > 0) {
           wav = groqWav;
           const rawVisemes = synthesizeVisemesFromText(sentence);
-          // Retime to the real WAV duration first, then use the WAV energy envelope
-          // so mouth movement follows actual speech rhythm instead of text only.
           const audioDurationSec = parseWavDurationSec(groqWav);
-          const durationScaled = audioDurationSec
-            ? scaleVisemesToDuration(rawVisemes, audioDurationSec)
-            : rawVisemes;
+          const durationScaled = audioDurationSec ? scaleVisemesToDuration(rawVisemes, audioDurationSec) : rawVisemes;
           visemes = alignVisemesToWavEnergy(groqWav, durationScaled);
           visemeSource = "fallback_audio";
           console.log(
@@ -167,22 +172,21 @@ export function createWsHandler() {
       }
     }
 
-    // Hard fallback: timed silence so avatar can animate its mouth.
-    if (!audioBase64 && !wav) {
+    if (!audioBase64 && !wav && !isTurnCancelled(turn)) {
       isSilence = true;
       const lastFrame = visemes.reduce((max, f) => Math.max(max, f.time), 0);
       const durationSec = Math.max(0.5, lastFrame + 0.25);
       wav = makeSilenceWavForDuration(durationSec);
-      console.warn(`[TTS] Both providers unavailable — sending ${durationSec.toFixed(2)}s silence for lip-sync.`);
+      console.warn(`[TTS] Both providers unavailable - sending ${durationSec.toFixed(2)}s silence for lip-sync.`);
     }
 
-    // Optional MuseTalk video frames (non-blocking, fires if MUSETALK_URL is set).
-    if (wav && process.env.MUSETALK_URL) {
+    if (wav && process.env.MUSETALK_URL && !isTurnCancelled(turn)) {
       const wavSnapshot = Buffer.from(wav);
       void (async () => {
         let frameIndex = 0;
         try {
           for await (const frameBase64 of streamMuseTalkFrames(wavSnapshot, persona.id)) {
+            if (isTurnCancelled(turn)) break;
             safeSend(ws, { type: "video_frame", frameBase64, sentenceIndex, frameIndex });
             frameIndex++;
           }
@@ -192,8 +196,11 @@ export function createWsHandler() {
       })();
     }
 
+    if (isTurnCancelled(turn)) return;
+
     safeSend(ws, {
       type: "audio_chunk",
+      turnId: turn.turnId,
       audioBase64: audioBase64 ?? bufferToBase64(wav ?? minimalSilenceWav()),
       audioMimeType: audioBase64 ? audioMimeType : "audio/wav",
       visemes,
@@ -206,54 +213,61 @@ export function createWsHandler() {
     });
   }
 
-  /** Emit complete sentences from buffer; never marks isLast (mid-turn). */
   async function emitCompleteSentences(
     ws: WebSocket,
     persona: Persona,
     buffer: { value: string },
     sentenceCounter: { value: number },
     emotion: Emotion,
-    latency: LatencyCtx
+    latency: LatencyCtx,
+    turn: ActiveTurnCtx
   ) {
-    for (;;) {
+    while (!isTurnCancelled(turn)) {
       const { sentence, rest } = splitLeadingSentence(buffer.value);
       if (!sentence) break;
       buffer.value = rest;
-      await processSentencePipeline(ws, persona, sentence, sentenceCounter.value, false, emotion, latency);
+      await processSentencePipeline(ws, persona, sentence, sentenceCounter.value, false, emotion, latency, turn);
       sentenceCounter.value += 1;
     }
   }
 
-  /** Finalize remaining buffer; exactly one emitted chunk will have isLast=true. */
   async function emitFinalTail(
     ws: WebSocket,
     persona: Persona,
     buffer: { value: string },
     sentenceCounter: { value: number },
     emotion: Emotion,
-    latency: LatencyCtx
+    latency: LatencyCtx,
+    turn: ActiveTurnCtx
   ) {
-    await emitCompleteSentences(ws, persona, buffer, sentenceCounter, emotion, latency);
+    if (isTurnCancelled(turn)) return;
+
+    await emitCompleteSentences(ws, persona, buffer, sentenceCounter, emotion, latency, turn);
+    if (isTurnCancelled(turn)) return;
+
     const tail = buffer.value.trim();
     if (tail.length) {
-      await processSentencePipeline(ws, persona, tail, sentenceCounter.value, true, emotion, latency);
+      await processSentencePipeline(ws, persona, tail, sentenceCounter.value, true, emotion, latency, turn);
       sentenceCounter.value += 1;
       buffer.value = "";
       return;
     }
+
     if (sentenceCounter.value === 0) {
-      await processSentencePipeline(ws, persona, "Thanks for your time.", 0, true, emotion, latency);
-    } else {
-      safeSend(ws, {
-        type: "audio_chunk",
-        audioBase64: bufferToBase64(minimalSilenceWav()),
-        audioMimeType: "audio/wav",
-        visemes: [{ time: 0, viseme: "sil", weight: 0 }],
-        emotion,
-        isLast: true,
-        sentenceIndex: sentenceCounter.value,
-      });
+      await processSentencePipeline(ws, persona, "Thanks for your time.", 0, true, emotion, latency, turn);
+      return;
     }
+
+    safeSend(ws, {
+      type: "audio_chunk",
+      turnId: turn.turnId,
+      audioBase64: bufferToBase64(minimalSilenceWav()),
+      audioMimeType: "audio/wav",
+      visemes: [{ time: 0, viseme: "sil", weight: 0 }],
+      emotion,
+      isLast: true,
+      sentenceIndex: sentenceCounter.value,
+    });
   }
 
   async function streamAssistantTurn(
@@ -261,8 +275,9 @@ export function createWsHandler() {
     persona: Persona,
     history: Message[],
     patientRequest: string,
-    latency: LatencyCtx
-  ): Promise<{ displayText: string; emotion: Emotion } | null> {
+    latency: LatencyCtx,
+    turn: ActiveTurnCtx
+  ): Promise<{ displayText: string; emotion: Emotion } | "cancelled" | null> {
     let raw = "";
     let lastDisplayLen = 0;
     let lastEmit = 0;
@@ -277,19 +292,18 @@ export function createWsHandler() {
         buildModelHistory(history),
         patientRequest
       )) {
+        if (isTurnCancelled(turn)) return "cancelled";
+
         raw += textDelta;
         const { emotion, displayText } = stripEmotionTag(raw);
 
-        // Record LLM first token when we have actual display text.
         if (latency.llmFirstTokenMs === null && displayText.trim().length > 0) {
           latency.llmFirstTokenMs = Date.now() - latency.t0;
           console.log(`[Latency] LLM first token: ${latency.llmFirstTokenMs}ms`);
         }
 
-        // Emit dedicated emotion event BEFORE the first TTS audio chunk.
-        // This lets the client pre-load the blendshape 200ms before audio starts.
         if (!emotionEmitted && displayText.trim().length > 0) {
-          safeSend(ws, { type: "emotion", tag: emotion });
+          safeSend(ws, { type: "emotion", turnId: turn.turnId, tag: emotion });
           emotionEmitted = true;
           console.log(`[Emotion] Emitted early: ${emotion}`);
         }
@@ -303,46 +317,52 @@ export function createWsHandler() {
           lastEmit = now;
           safeSend(ws, {
             type: "transcript_update",
+            turnId: turn.turnId,
             role: "assistant",
             text: displayText,
             emotion,
           });
         }
 
-        await emitCompleteSentences(ws, persona, ttsBuf, sentenceCounter, emotion, latency);
+        await emitCompleteSentences(ws, persona, ttsBuf, sentenceCounter, emotion, latency, turn);
       }
+
+      if (isTurnCancelled(turn)) return "cancelled";
 
       const { emotion, displayText } = stripEmotionTag(raw);
 
-      // Ensure emotion is emitted even if response was very short.
       if (!emotionEmitted) {
-        safeSend(ws, { type: "emotion", tag: emotion });
+        safeSend(ws, { type: "emotion", turnId: turn.turnId, tag: emotion });
       }
 
       safeSend(ws, {
         type: "transcript_update",
+        turnId: turn.turnId,
         role: "assistant",
         text: displayText,
         emotion,
       });
 
-      await emitFinalTail(ws, persona, ttsBuf, sentenceCounter, emotion, latency);
+      await emitFinalTail(ws, persona, ttsBuf, sentenceCounter, emotion, latency, turn);
+      if (isTurnCancelled(turn)) return "cancelled";
 
-      // Emit server-side latency telemetry for this turn.
       const totalMs = Date.now() - latency.t0;
       safeSend(ws, {
         type: "latency",
+        turnId: turn.turnId,
         stt_ms: 0,
         llm_first_token_ms: latency.llmFirstTokenMs ?? 0,
         tts_start_ms: latency.ttsStartMs ?? 0,
         total_ms: totalMs,
       });
       console.log(
-        `[Latency] Turn complete — LLM: ${latency.llmFirstTokenMs ?? "?"}ms, TTS start: ${latency.ttsStartMs ?? "?"}ms, Total: ${totalMs}ms`
+        `[Latency] Turn complete - LLM: ${latency.llmFirstTokenMs ?? "?"}ms, TTS start: ${latency.ttsStartMs ?? "?"}ms, Total: ${totalMs}ms`
       );
 
       return { displayText, emotion };
     } catch (err) {
+      if (isTurnCancelled(turn)) return "cancelled";
+
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[streamAssistantTurn] error:", msg);
       let clientMsg = "An error occurred while generating the response.";
@@ -360,23 +380,31 @@ export function createWsHandler() {
 
   function buildIntroGreeting(persona: Persona, patientRequest = "") {
     return patientRequest.trim()
-      ? `[CONCERNED]\nHello — I'm ${persona.name}. I saw the patient context you shared. Before we talk product, I want to understand how your data helps with that specific concern.`
-      : `[ENGAGED]\nHello — I'm ${persona.name}. I only have a few minutes, but I'm listening. What should we focus on today?`;
+      ? `[CONCERNED]\nHello - I'm ${persona.name}. I saw the patient context you shared. Before we talk product, I want to understand how your data helps with that specific concern.`
+      : `[ENGAGED]\nHello - I'm ${persona.name}. I only have a few minutes, but I'm listening. What should we focus on today?`;
   }
 
-  async function sendIntro(ws: WebSocket, persona: Persona, latency: LatencyCtx, patientRequest = "") {
+  async function sendIntro(
+    ws: WebSocket,
+    persona: Persona,
+    latency: LatencyCtx,
+    patientRequest = "",
+    turn: ActiveTurnCtx
+  ) {
     const greeting = buildIntroGreeting(persona, patientRequest);
     const { emotion, displayText } = stripEmotionTag(greeting);
-    safeSend(ws, { type: "emotion", tag: emotion });
+    safeSend(ws, { type: "emotion", turnId: turn.turnId, tag: emotion });
     safeSend(ws, {
       type: "transcript_update",
+      turnId: turn.turnId,
       role: "assistant",
       text: displayText,
       emotion,
     });
     const ttsBuf = { value: displayText };
     const sentenceCounter = { value: 0 };
-    await emitFinalTail(ws, persona, ttsBuf, sentenceCounter, emotion, latency);
+    await emitFinalTail(ws, persona, ttsBuf, sentenceCounter, emotion, latency, turn);
+    return { emotion, displayText };
   }
 
   return async function handleMessage(ws: WebSocket, raw: string) {
@@ -394,6 +422,7 @@ export function createWsHandler() {
         safeSend(ws, { type: "error", message: "Unknown persona" });
         return;
       }
+
       const patientRequest = cleanPatientRequest(msg.patientRequest);
       const existing = sessions.get(msg.sessionId);
       const cap = {
@@ -407,42 +436,64 @@ export function createWsHandler() {
         musetalk: { available: !!process.env.MUSETALK_URL },
       };
 
-      if (existing?.messages.some((m) => m.role === "user")) {
-        existing.patientRequest = patientRequest || existing.patientRequest;
-        safeSend(ws, { type: "session_start", sessionId: msg.sessionId, personaId: msg.personaId });
-        safeSend(ws, cap);
-        return;
-      }
-      if (existing && !existing.messages.some((m) => m.role === "user")) {
+      if (existing) {
         existing.patientRequest = patientRequest || existing.patientRequest;
         safeSend(ws, { type: "session_start", sessionId: msg.sessionId, personaId: msg.personaId });
         safeSend(ws, cap);
         return;
       }
 
-      sessions.set(msg.sessionId, { personaId: persona.id, messages: [], patientRequest });
+      const session: SessionCtx = {
+        personaId: persona.id,
+        messages: [],
+        patientRequest,
+        complianceEvents: [],
+        activeTurn: null,
+      };
+      sessions.set(msg.sessionId, session);
       safeSend(ws, { type: "session_start", sessionId: msg.sessionId, personaId: msg.personaId });
       safeSend(ws, cap);
 
       const introLatency: LatencyCtx = { t0: Date.now(), llmFirstTokenMs: null, ttsStartMs: null };
-      await sendIntro(ws, persona, introLatency, patientRequest);
-
-      const intro = stripEmotionTag(buildIntroGreeting(persona, patientRequest));
-      const ctx0 = sessions.get(msg.sessionId);
-      if (ctx0) {
-        ctx0.messages.push({
+      const introTurn: ActiveTurnCtx = { turnId: `intro:${msg.sessionId}`, cancelled: false };
+      session.activeTurn = introTurn;
+      const intro = await sendIntro(ws, persona, introLatency, patientRequest, introTurn);
+      if (!introTurn.cancelled) {
+        session.messages.push({
           role: "assistant",
           content: intro.displayText,
           emotion: intro.emotion,
           timestamp: Date.now(),
         });
       }
+      if (session.activeTurn === introTurn) {
+        session.activeTurn = null;
+      }
+      return;
+    }
+
+    if (msg.type === "interrupt") {
+      const ctx = sessions.get(msg.sessionId);
+      if (!ctx?.activeTurn) return;
+      if (!msg.turnId || ctx.activeTurn.turnId === msg.turnId) {
+        ctx.activeTurn.cancelled = true;
+      }
       return;
     }
 
     if (msg.type === "session_end") {
       const ctx = sessions.get(msg.sessionId);
-      const history = ctx ? [...ctx.messages] : [];
+      if (!ctx) {
+        safeSend(ws, { type: "session_end", sessionId: msg.sessionId });
+        return;
+      }
+
+      if (ctx.activeTurn) {
+        ctx.activeTurn.cancelled = true;
+        ctx.activeTurn = null;
+      }
+
+      const history = [...ctx.messages];
       sessions.delete(msg.sessionId);
       safeSend(ws, { type: "session_end", sessionId: msg.sessionId });
 
@@ -468,24 +519,41 @@ export function createWsHandler() {
         return;
       }
 
+      if (ctx.activeTurn) {
+        ctx.activeTurn.cancelled = true;
+      }
+
       const latency: LatencyCtx = { t0: Date.now(), llmFirstTokenMs: null, ttsStartMs: null };
-      console.log(`[Latency] Turn started for session ${msg.sessionId.slice(0, 8)}`);
+      const turn: ActiveTurnCtx = { turnId: msg.turnId, cancelled: false };
+      ctx.activeTurn = turn;
+      console.log(`[Latency] Turn started for session ${msg.sessionId.slice(0, 8)} turn ${msg.turnId.slice(0, 8)}`);
 
       const nextPatientRequest = cleanPatientRequest(msg.patientRequest);
       if (nextPatientRequest) ctx.patientRequest = nextPatientRequest;
 
+      const complianceEvents = scanCompliance(msg.text, msg.turnId);
+      if (complianceEvents.length > 0) {
+        ctx.complianceEvents.push(...complianceEvents);
+        for (const event of complianceEvents) {
+          safeSend(ws, { type: "compliance_event", sessionId: msg.sessionId, event });
+        }
+      }
+
       ctx.messages.push({ role: "user", content: msg.text, timestamp: Date.now() });
       const history = [...ctx.messages];
-      const result = await streamAssistantTurn(ws, persona, history, ctx.patientRequest, latency);
-      if (result) {
+      const result = await streamAssistantTurn(ws, persona, history, ctx.patientRequest, latency, turn);
+
+      if (ctx.activeTurn === turn) {
+        ctx.activeTurn = null;
+      }
+
+      if (result && result !== "cancelled") {
         ctx.messages.push({
           role: "assistant",
           content: result.displayText,
           emotion: result.emotion,
           timestamp: Date.now(),
         });
-      } else {
-        ctx.messages.pop();
       }
     }
   };
