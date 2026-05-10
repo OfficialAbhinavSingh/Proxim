@@ -1,15 +1,12 @@
-import { defineConfig, type Plugin } from "vite";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { IncomingMessage, ServerResponse } from "node:http";
-
-type Next = () => void;
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-function readInstalledOrtVersion(): string {
+function readInstalledOrtVersion() {
   const candidates = [
     join(__dirname, "node_modules", "onnxruntime-web", "package.json"),
     join(__dirname, "node_modules", "@ricky0123", "vad-web", "node_modules", "onnxruntime-web", "package.json"),
@@ -17,10 +14,10 @@ function readInstalledOrtVersion(): string {
   for (const p of candidates) {
     if (!existsSync(p)) continue;
     try {
-      const v = JSON.parse(readFileSync(p, "utf8")) as { version?: string };
+      const v = JSON.parse(readFileSync(p, "utf8"));
       if (v.version) return v.version;
     } catch {
-      /* try next */
+      // Try the next candidate.
     }
   }
   throw new Error(
@@ -30,12 +27,8 @@ function readInstalledOrtVersion(): string {
 
 const ortWasmVersion = readInstalledOrtVersion();
 
-/**
- * Ready Player Me GLB proxy: browser loads same-origin `/__rpm/<id>.glb?...`,
- * Node fetches `https://models.readyplayer.me/<id>.glb?...`.
- */
 function createRpmProxyMiddleware() {
-  return (req: IncomingMessage, res: ServerResponse, next: Next) => {
+  return (req, res, next) => {
     const raw = req.url ?? "";
     if (req.method !== "GET" && req.method !== "HEAD") return next();
     if (!raw.startsWith("/__rpm/") || !raw.includes(".glb")) return next();
@@ -66,7 +59,7 @@ function createRpmProxyMiddleware() {
         const buf = Buffer.from(await r.arrayBuffer());
         res.end(buf);
       })
-      .catch((e: unknown) => {
+      .catch((e) => {
         res.statusCode = 502;
         res.setHeader("Content-Type", "text/plain; charset=utf-8");
         res.end(e instanceof Error ? e.message : "RPM proxy failed");
@@ -74,12 +67,12 @@ function createRpmProxyMiddleware() {
   };
 }
 
-function rpmProxyVitePlugin(): Plugin {
+function rpmProxyVitePlugin() {
   const handle = createRpmProxyMiddleware();
-  const prepend = (server: { middlewares: { use: (fn: unknown) => void; stack?: unknown[] } }) => {
+  const prepend = (server) => {
     const stack = server.middlewares.stack;
     if (Array.isArray(stack)) {
-      stack.unshift({ route: "", handle } as never);
+      stack.unshift({ route: "", handle });
     } else {
       server.middlewares.use(handle);
     }
