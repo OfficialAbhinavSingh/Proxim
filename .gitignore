@@ -41,5 +41,5 @@ Thumbs.db
 _tmp/
 *.wav
 *.glb
+!client/public/avatars/*.glb
 tmp/
-
