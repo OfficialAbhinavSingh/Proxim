@@ -14,6 +14,18 @@ import type { Emotion, Message, Persona } from "../types/index.js";
 
 const CLAUDE_MODEL = "claude-sonnet-4-20250514";
 const GROQ_MODEL = "llama-3.3-70b-versatile";
+const OPENAI_CHAT_MODEL = process.env.OPENAI_CHAT_MODEL ?? "gpt-4.1";
+
+type LlmProvider = "groq" | "anthropic" | "openai";
+
+function configuredProviderOrder(): LlmProvider[] {
+  const requested = process.env.LLM_PROVIDER?.trim().toLowerCase();
+  if (requested === "groq" || requested === "anthropic" || requested === "openai") {
+    return [requested];
+  }
+  // Keep existing behavior by default. OpenAI is reached only after Groq/Claude.
+  return ["groq", "anthropic", "openai"];
+}
 
 function buildSystemPrompt(persona: Persona, patientRequest?: string): string {
   const complianceClause = persona.complianceMode
@@ -125,6 +137,63 @@ async function* streamAnthropicResponse(
   }
 }
 
+type OpenAIChatChunk = {
+  choices?: Array<{ delta?: { content?: string } }>;
+};
+
+async function* streamOpenAIResponse(
+  apiKey: string,
+  persona: Persona,
+  history: Message[],
+  patientRequest?: string
+): AsyncGenerator<{ textDelta: string }> {
+  const system = `${buildSystemPrompt(persona, patientRequest)}\n\nAdditional persona notes:\n${persona.systemPrompt}`;
+
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: OPENAI_CHAT_MODEL,
+      messages: [
+        { role: "system", content: system },
+        ...history.map((m) => ({ role: m.role, content: m.content })),
+      ],
+      max_tokens: 1024,
+      stream: true,
+    }),
+  });
+
+  if (!res.ok || !res.body) {
+    const err = await res.text().catch(() => "");
+    throw new Error(`OpenAI chat failed: ${res.status} ${err}`);
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice("data:".length).trim();
+      if (!data || data === "[DONE]") continue;
+      const parsed = JSON.parse(data) as OpenAIChatChunk;
+      const delta = parsed.choices?.[0]?.delta?.content;
+      if (delta) yield { textDelta: delta };
+    }
+  }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export async function* streamClaudeResponse(
@@ -134,25 +203,33 @@ export async function* streamClaudeResponse(
   patientRequest?: string
 ): AsyncGenerator<{ textDelta: string }> {
   const groqKey = process.env.GROQ_API_KEY;
+  const anthropicKey = apiKey;
+  const openaiKey = process.env.OPENAI_API_KEY;
 
-  // Prefer Groq (free) if its key is set
-  if (groqKey) {
-    console.log("[LLM] Using Groq (llama-3.3-70b-versatile)");
-    yield* streamGroqResponse(groqKey, persona, history, patientRequest);
-    return;
-  }
+  for (const provider of configuredProviderOrder()) {
+    if (provider === "groq" && groqKey) {
+      console.log("[LLM] Using Groq (llama-3.3-70b-versatile)");
+      yield* streamGroqResponse(groqKey, persona, history, patientRequest);
+      return;
+    }
 
-  // Fall back to Anthropic
-  if (apiKey) {
-    console.log("[LLM] Using Anthropic Claude Sonnet");
-    yield* streamAnthropicResponse(apiKey, persona, history, patientRequest);
-    return;
+    if (provider === "anthropic" && anthropicKey) {
+      console.log("[LLM] Using Anthropic Claude Sonnet");
+      yield* streamAnthropicResponse(anthropicKey, persona, history, patientRequest);
+      return;
+    }
+
+    if (provider === "openai" && openaiKey) {
+      console.log(`[LLM] Using OpenAI (${OPENAI_CHAT_MODEL})`);
+      yield* streamOpenAIResponse(openaiKey, persona, history, patientRequest);
+      return;
+    }
   }
 
   // No key configured
   yield {
     textDelta:
-      "[NEUTRAL]\nI'm having trouble reaching my reasoning service right now. Please set GROQ_API_KEY or ANTHROPIC_API_KEY in server/.env",
+      "[NEUTRAL]\nI'm having trouble reaching my reasoning service right now. Please set GROQ_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY in server/.env",
   };
 }
 
@@ -190,6 +267,7 @@ export async function generateScoreCard(
 ): Promise<ScoreCard | null> {
   const groqKey = process.env.GROQ_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
 
   // Build a readable transcript of only the conversation (no system)
   const transcript = messages
@@ -205,31 +283,63 @@ export async function generateScoreCard(
   try {
     let rawJson = "";
 
-    if (groqKey) {
-      const client = new Groq({ apiKey: groqKey });
-      const res = await client.chat.completions.create({
-        model: GROQ_MODEL,
-        messages: [
-          { role: "system", content: SCORECARD_PROMPT },
-          { role: "user", content: userContent },
-        ],
-        max_tokens: 512,
-        stream: false,
-      });
-      rawJson = res.choices[0]?.message?.content ?? "";
-    } else if (anthropicKey) {
-      const client = new Anthropic({ apiKey: anthropicKey });
-      const res = await client.messages.create({
-        model: CLAUDE_MODEL,
-        max_tokens: 512,
-        system: SCORECARD_PROMPT,
-        messages: [{ role: "user", content: userContent }],
-      });
-      const block = res.content[0];
-      rawJson = block.type === "text" ? block.text : "";
-    } else {
-      return null; // No LLM configured
+    for (const provider of configuredProviderOrder()) {
+      if (provider === "groq" && groqKey) {
+        const client = new Groq({ apiKey: groqKey });
+        const res = await client.chat.completions.create({
+          model: GROQ_MODEL,
+          messages: [
+            { role: "system", content: SCORECARD_PROMPT },
+            { role: "user", content: userContent },
+          ],
+          max_tokens: 512,
+          stream: false,
+        });
+        rawJson = res.choices[0]?.message?.content ?? "";
+        break;
+      }
+
+      if (provider === "anthropic" && anthropicKey) {
+        const client = new Anthropic({ apiKey: anthropicKey });
+        const res = await client.messages.create({
+          model: CLAUDE_MODEL,
+          max_tokens: 512,
+          system: SCORECARD_PROMPT,
+          messages: [{ role: "user", content: userContent }],
+        });
+        const block = res.content[0];
+        rawJson = block.type === "text" ? block.text : "";
+        break;
+      }
+
+      if (provider === "openai" && openaiKey) {
+        const res = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${openaiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: OPENAI_CHAT_MODEL,
+            messages: [
+              { role: "system", content: SCORECARD_PROMPT },
+              { role: "user", content: userContent },
+            ],
+            max_tokens: 512,
+            stream: false,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.text().catch(() => "");
+          throw new Error(`OpenAI scorecard failed: ${res.status} ${err}`);
+        }
+        const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+        rawJson = json.choices?.[0]?.message?.content ?? "";
+        break;
+      }
     }
+
+    if (!rawJson) return null; // No LLM configured
 
     // Strip possible markdown fences
     const cleaned = rawJson.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();

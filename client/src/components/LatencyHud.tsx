@@ -28,7 +28,8 @@ export function LatencyHud() {
   const latency = useSessionStore((s) => s.latency);
   const serverLatency = useSessionStore((s) => s.serverLatency);
 
-  const hasClientData = latency.llmMs != null || latency.audioMs != null || latency.active;
+  const hasClientData =
+    latency.llmMs != null || latency.audioMs != null || latency.lipSyncMs != null || latency.active;
   const hasServerData =
     serverLatency.llm_first_token_ms !== null || serverLatency.total_ms !== null;
 
@@ -57,6 +58,7 @@ export function LatencyHud() {
           </div>
           <Row label="LLM first token" ms={serverLatency.llm_first_token_ms} />
           <Row label="TTS start" ms={serverLatency.tts_start_ms} />
+          <Row label="Visible lip sync" ms={latency.lipSyncMs} />
           <div
             className="mt-1.5 flex items-center justify-between gap-3 rounded-md px-1.5 py-1"
             style={{ background: `${totalColor}15`, border: `1px solid ${totalColor}40` }}
@@ -84,7 +86,8 @@ export function LatencyHud() {
             Client-side
           </div>
           <Row label="LLM first text" ms={latency.llmMs} />
-          <Row label="First TTS chunk" ms={latency.audioMs} />
+          <Row label="First audio chunk" ms={latency.audioMs} />
+          <Row label="First lip sync" ms={latency.lipSyncMs} />
         </>
       )}
     </div>
