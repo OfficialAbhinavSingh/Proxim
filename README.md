@@ -59,7 +59,7 @@ Server (Node.js + Express + ws)
 - Node.js + Express + TypeScript
 - WebSocket session transport
 - Persona-driven prompt orchestration
-- Groq, Anthropic, ElevenLabs, and optional OpenAI integration points
+- Groq, Anthropic, OpenAI, and ElevenLabs integration points
 
 ## Repository Structure
 
@@ -103,6 +103,8 @@ Optional quality/fallback providers:
 - `ELEVENLABS_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `OPENAI_API_KEY`
+- `LLM_PROVIDER` (`auto`, `groq`, `anthropic`, or `openai`)
+- `OPENAI_CHAT_MODEL` (defaults to `gpt-4.1`)
 
 ### 1. Install dependencies
 
@@ -228,6 +230,8 @@ See [server/.env.example](server/.env.example) for the full list. Main variables
 - `ELEVENLABS_API_KEY`
 - `ELEVENLABS_DEFAULT_VOICE_ID`
 - `OPENAI_API_KEY`
+- `LLM_PROVIDER`
+- `OPENAI_CHAT_MODEL`
 - `GROQ_STT_MODEL`
 - `PERSONAS_PATH`
 

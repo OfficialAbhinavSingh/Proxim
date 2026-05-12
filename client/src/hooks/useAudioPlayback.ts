@@ -224,6 +224,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
         // Use Web Speech Synthesis for voice + let viseme track run for the
         // natural speech duration (Web Speech handles its own timing).
         await speakWithWebSpeech(next.text, next.emotion, () => {
+          useSessionStore.getState().markLipSyncLatencyIfNeeded();
           useAvatarStore.getState().setVisemeTrack(next.visemes, performance.now(), {
             sentenceIndex: next.sentenceIndex,
             isSilence: !!next.isSilence,
@@ -267,6 +268,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
             st.lastChunk.sentenceIndex === next.sentenceIndex &&
             st.lastChunk.receivedAt === next.receivedAt &&
             st.visemes.length > 0;
+          useSessionStore.getState().markLipSyncLatencyIfNeeded();
           // Reuse only when we are re-syncing the exact same chunk to actual playback.
           if (isSameChunk) st.setChunkStartedAt(perfStart, meta);
           else st.setVisemeTrack(next.visemes, perfStart, meta);
@@ -278,6 +280,7 @@ export function useAudioPlayback(onLastChunkEnded?: () => void) {
       if (next.text?.trim()) {
         try {
           await speakWithWebSpeech(next.text, next.emotion, () => {
+            useSessionStore.getState().markLipSyncLatencyIfNeeded();
             useAvatarStore.getState().setVisemeTrack(next.visemes, performance.now(), {
               sentenceIndex: next.sentenceIndex,
               isSilence: !!next.isSilence,

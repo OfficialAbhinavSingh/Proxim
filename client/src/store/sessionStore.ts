@@ -31,6 +31,7 @@ export interface SessionState {
     t0: number;
     llmMs: number | null;
     audioMs: number | null;
+    lipSyncMs: number | null;
   };
 
   /** Server-reported pipeline latency from the most recent turn. */
@@ -66,6 +67,7 @@ export interface SessionState {
   beginLatencyTurn: () => void;
   markLlmLatencyIfNeeded: (assistantText: string) => void;
   markAudioLatencyIfNeeded: () => void;
+  markLipSyncLatencyIfNeeded: () => void;
   clearLatencyTurn: () => void;
   setServerLatency: (data: SessionState["serverLatency"]) => void;
 }
@@ -91,7 +93,7 @@ export const useSessionStore = create<SessionState>((set) => ({
     elevenLabsConfigured: null,
     groqConfigured: null,
   },
-  latency: { active: false, t0: 0, llmMs: null, audioMs: null },
+  latency: { active: false, t0: 0, llmMs: null, audioMs: null, lipSyncMs: null },
   serverLatency: { stt_ms: null, llm_first_token_ms: null, tts_start_ms: null, total_ms: null },
 
   setPersonaId: (personaId) => set({ personaId }),
@@ -131,7 +133,7 @@ export const useSessionStore = create<SessionState>((set) => ({
 
   beginLatencyTurn: () =>
     set({
-      latency: { active: true, t0: performance.now(), llmMs: null, audioMs: null },
+      latency: { active: true, t0: performance.now(), llmMs: null, audioMs: null, lipSyncMs: null },
     }),
   markLlmLatencyIfNeeded: (assistantText) =>
     set((s) => {
@@ -148,9 +150,16 @@ export const useSessionStore = create<SessionState>((set) => ({
         latency: { ...s.latency, audioMs: Math.round(performance.now() - s.latency.t0) },
       };
     }),
+  markLipSyncLatencyIfNeeded: () =>
+    set((s) => {
+      if (!s.latency.active || s.latency.lipSyncMs != null) return s;
+      return {
+        latency: { ...s.latency, lipSyncMs: Math.round(performance.now() - s.latency.t0) },
+      };
+    }),
   clearLatencyTurn: () =>
     set({
-      latency: { active: false, t0: 0, llmMs: null, audioMs: null },
+      latency: { active: false, t0: 0, llmMs: null, audioMs: null, lipSyncMs: null },
     }),
   setServerLatency: (serverLatency) => set({ serverLatency }),
 
@@ -173,7 +182,7 @@ export const useSessionStore = create<SessionState>((set) => ({
         elevenLabsConfigured: null,
         groqConfigured: null,
       },
-      latency: { active: false, t0: 0, llmMs: null, audioMs: null },
+      latency: { active: false, t0: 0, llmMs: null, audioMs: null, lipSyncMs: null },
       serverLatency: { stt_ms: null, llm_first_token_ms: null, tts_start_ms: null, total_ms: null },
     }),
 }));

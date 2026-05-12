@@ -22,13 +22,13 @@ During a live call:
 1. The browser captures rep speech.
 2. Speech is transcribed locally when supported, with a server-side fallback path available for more controlled environments.
 3. The transcript is sent to the backend over WebSocket.
-4. The backend appends the new utterance to session history and streams an LLM response.
+4. The backend appends the new utterance to session history and streams an LLM response from the configured provider: Groq, Anthropic Claude, or OpenAI GPT-4 family models.
 5. Partial assistant text is emitted to the client as transcript updates.
 6. Completed sentence fragments are synthesized to audio immediately instead of waiting for the full answer.
 7. Audio, viseme timing, and emotion tags are streamed back to the browser.
 8. The avatar speaks, animates, and displays the ongoing transcript in real time.
 
-The key design choice here is sentence-buffered streaming. It reduces perceived latency because audio generation can begin while the LLM is still producing the remainder of the response.
+The key design choice here is sentence-buffered streaming. It reduces perceived latency because audio generation can begin while the LLM is still producing the remainder of the response. The demo also captures first-token, first-audio, and first-visible-lip-sync timing so latency claims can be measured during evaluation.
 
 ## Voice and Lip Sync Strategy
 

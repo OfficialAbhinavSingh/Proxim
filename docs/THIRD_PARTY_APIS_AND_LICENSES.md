@@ -9,7 +9,7 @@ This document summarizes the external services, models, and major libraries used
 | Groq | LLM inference, TTS fallback, Whisper STT fallback | Commercial API service. Usage requires a Groq account and is governed by Groq platform terms and model availability terms. Teams should verify commercial rights and rate limits for their chosen plan. |
 | Anthropic | Claude-based response fallback and scorecard evaluation | Commercial API service. Usage requires an Anthropic account and is governed by Anthropic API/service terms. |
 | ElevenLabs | Primary aligned text-to-speech with phoneme timing | Commercial API service. Usage requires an ElevenLabs account and is governed by ElevenLabs licensing and voice usage terms. |
-| OpenAI | Whisper fallback path when configured | Commercial API service. Usage requires an OpenAI account and is governed by OpenAI API terms. |
+| OpenAI | Optional GPT-4 family dialogue provider and Whisper fallback path when configured | Commercial API service. Usage requires an OpenAI account and is governed by OpenAI API terms. |
 | Ready Player Me | Avatar hosting / source GLB compatibility path | Third-party avatar platform. Users should verify avatar asset usage rights and platform terms for any production deployment. |
 
 ## Open-Source Libraries
