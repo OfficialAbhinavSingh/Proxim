@@ -17,51 +17,51 @@ body {
 }
 
 :root {
-  /* Light theme — calm clinical neutrals with health-forward cyan/indigo accents */
-  --c-bg: 248 250 252; /* slate-50-ish */
-  --c-fg: 11 18 32; /* deep ink */
-  --c-muted: 70 84 103; /* slate-600-ish */
-  --c-subtle: 122 135 156; /* slate-500-ish */
-  --c-border: 212 221 235; /* soft border */
-  --c-surface: 255 255 255;
-  --c-surface2: 244 247 252;
-  --c-accent: 13 148 136; /* teal-600 */
-  --c-accent2: 37 99 235; /* blue-600 */
-  --c-success: 22 163 74; /* green-600 */
-  --c-danger: 220 38 38; /* red-600 */
+  /* Light theme: soft ocean mist with calm aqua accents */
+  --c-bg: 231 242 243;
+  --c-fg: 12 39 52;
+  --c-muted: 75 101 111;
+  --c-subtle: 111 135 143;
+  --c-border: 173 204 208;
+  --c-surface: 245 250 249;
+  --c-surface2: 224 238 239;
+  --c-accent: 22 132 126;
+  --c-accent2: 42 126 151;
+  --c-success: 24 134 99;
+  --c-danger: 188 76 80;
 
   --app-bg:
-    radial-gradient(900px 600px at 18% 12%, rgba(13, 148, 136, 0.18), transparent 55%),
-    radial-gradient(800px 560px at 78% 18%, rgba(37, 99, 235, 0.14), transparent 58%),
-    linear-gradient(180deg, rgb(248 250 252), rgb(241 245 249));
+    radial-gradient(900px 620px at 18% 8%, rgba(75, 158, 154, 0.1), transparent 62%),
+    radial-gradient(820px 560px at 82% 14%, rgba(70, 135, 158, 0.08), transparent 64%),
+    linear-gradient(180deg, rgb(239 247 246), rgb(224 238 240));
 }
 
 .dark {
-  /* Dark theme — deep navy with restrained, medical-tech gradients (no glow/shadows) */
-  --c-bg: 8 12 20;
-  --c-fg: 231 237 246;
-  --c-muted: 152 164 184;
-  --c-subtle: 124 138 161;
-  --c-border: 31 43 62;
-  --c-surface: 12 18 30;
-  --c-surface2: 16 25 41;
-  --c-accent: 45 212 191; /* teal-400 */
-  --c-accent2: 99 102 241; /* indigo-500 */
-  --c-success: 52 211 153; /* emerald-400 */
-  --c-danger: 248 113 113; /* rose-400 */
+  /* Dark theme: deep ocean tones with the existing quiet clinical feel */
+  --c-bg: 5 22 32;
+  --c-fg: 226 244 246;
+  --c-muted: 142 176 184;
+  --c-subtle: 105 143 153;
+  --c-border: 27 67 80;
+  --c-surface: 8 32 45;
+  --c-surface2: 12 43 57;
+  --c-accent: 52 211 187;
+  --c-accent2: 56 171 204;
+  --c-success: 73 201 154;
+  --c-danger: 238 111 118;
 
   --app-bg:
-    radial-gradient(900px 600px at 18% 12%, rgba(45, 212, 191, 0.16), transparent 58%),
-    radial-gradient(820px 560px at 78% 18%, rgba(99, 102, 241, 0.16), transparent 60%),
-    linear-gradient(180deg, rgb(8 12 20), rgb(10 16 28));
+    radial-gradient(900px 620px at 18% 10%, rgba(34, 173, 164, 0.15), transparent 60%),
+    radial-gradient(860px 580px at 82% 16%, rgba(46, 131, 168, 0.15), transparent 62%),
+    linear-gradient(180deg, rgb(5 22 32), rgb(4 17 27));
 }
 
 @layer base {
   ::selection {
-    background: rgba(13, 148, 136, 0.22);
+    background: rgba(14, 140, 132, 0.22);
   }
   .dark ::selection {
-    background: rgba(45, 212, 191, 0.22);
+    background: rgba(52, 211, 187, 0.24);
   }
 }
 

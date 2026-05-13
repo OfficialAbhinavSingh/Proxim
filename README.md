@@ -11,6 +11,7 @@ The project is built to match the Proxa Echo integration model: React front end,
 - README with setup, dependencies, and architecture overview: this file
 - Working demo video: add your recording link before submission
 - Brief written technical document: [docs/TECHNICAL_APPROACH.md](docs/TECHNICAL_APPROACH.md)
+- AWS/Docker deployment guide: [docs/AWS_DOCKER_DEPLOYMENT.md](docs/AWS_DOCKER_DEPLOYMENT.md)
 - Third-party API/model documentation with licensing notes: [docs/THIRD_PARTY_APIS_AND_LICENSES.md](docs/THIRD_PARTY_APIS_AND_LICENSES.md)
 
 ## What the project demonstrates
@@ -153,6 +154,8 @@ Endpoints:
 
 - Client: `http://localhost:8080`
 - Server health: `http://localhost:3001/health`
+
+For AWS EC2 deployment, scalability notes, and reviewer checks, see [docs/AWS_DOCKER_DEPLOYMENT.md](docs/AWS_DOCKER_DEPLOYMENT.md).
 
 ## Key Runtime Behavior
 

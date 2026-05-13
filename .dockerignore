@@ -5,6 +5,10 @@ node_modules
 dist
 **/dist
 _tmp
+tmp
+.codex
+.cache
 *.log
 client/.env
 server/.env
+client-avatar-background-check.png
