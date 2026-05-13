@@ -298,6 +298,8 @@ function PlaceholderAvatar() {
 
 export function AvatarCanvas({ avatarUrl, personaId }: AvatarCanvasProps) {
   void PlaceholderAvatar;
+  const consultationSceneUrl = "/scene-backgrounds/hospital-consultation-room.png";
+  const consultationSceneBackground = `url("${consultationSceneUrl}")`;
   /** Final GLB URL after optional RPM proxy preflight (avoids 502 loop + runaway canvas when load fails). */
   const [gltfUrl, setGltfUrl] = useState<string | null>(null);
   const [avatarStatus, setAvatarStatus] = useState<"preparing" | "ready" | "fallback">("preparing");
@@ -484,8 +486,42 @@ export function AvatarCanvas({ avatarUrl, personaId }: AvatarCanvasProps) {
           "linear-gradient(165deg, rgb(var(--c-surface2) / 0.92), rgb(var(--c-surface) / 0.72))",
       }}
     >
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0"
+        style={{
+          backgroundImage: consultationSceneBackground,
+          backgroundPosition: "center center",
+          backgroundSize: "cover",
+          filter: "blur(1.5px) saturate(0.92)",
+          opacity: 0.72,
+          transform: "scale(1.025)",
+        }}
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 bottom-0"
+        style={{
+          height: "31%",
+          backgroundImage: consultationSceneBackground,
+          backgroundPosition: "center bottom",
+          backgroundSize: "cover",
+          filter: "saturate(0.94) contrast(0.96)",
+          opacity: 0.48,
+          maskImage: "linear-gradient(180deg, transparent 0%, black 22%, black 100%)",
+          WebkitMaskImage: "linear-gradient(180deg, transparent 0%, black 22%, black 100%)",
+        }}
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0"
+        style={{
+          background:
+            "radial-gradient(circle at 50% 28%, transparent 0%, rgb(var(--c-bg) / 0.1) 54%, rgb(var(--c-bg) / 0.5) 100%), linear-gradient(180deg, rgb(var(--c-surface2) / 0.1), rgb(var(--c-bg) / 0.28))",
+        }}
+      />
       {!gltfUrl ? (
-        <div className="flex h-full w-full items-center justify-center">
+        <div className="relative z-10 flex h-full w-full items-center justify-center">
           <p className="text-xs text-muted">
             {avatarStatus === "fallback" ? "Recovering avatar..." : "Preparing avatar..."}
           </p>
@@ -494,7 +530,7 @@ export function AvatarCanvas({ avatarUrl, personaId }: AvatarCanvasProps) {
         <CanvasErrorBoundary fallback={fallbackOverlay}>
           <Canvas
             key={`${gltfUrl}:${canvasEpoch}`}
-            className="block h-full w-full touch-none"
+            className="relative z-10 block h-full w-full touch-none"
             style={{ width: "100%", height: "100%", display: "block" }}
             dpr={1}
             gl={{
@@ -531,6 +567,7 @@ export function AvatarCanvas({ avatarUrl, personaId }: AvatarCanvasProps) {
         className="pointer-events-none absolute inset-x-0 bottom-0 h-24"
         style={{
           background: "linear-gradient(180deg, transparent, rgb(var(--c-bg) / 0.55))",
+          zIndex: 20,
         }}
       />
     </div>
