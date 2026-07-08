@@ -1,5 +1,7 @@
 # Proxim
 
+🏆 Reached the top 5 teams at the finale out of 200+ competing teams.
+
 Proxim is a browser-based conversational avatar trainer for pharmaceutical sales teams. A rep speaks to a simulated healthcare professional, the system transcribes the question, generates a persona-grounded response, streams audio back in real time, animates a 3D avatar while speaking, and then produces a post-call coaching scorecard.
 
 The project is built to match the Proxa Echo integration model: React front end, live multi-turn sessions, configurable HCP personas, and container-friendly deployment.
