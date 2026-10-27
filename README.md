@@ -1,28 +1,47 @@
-# Proxim
+<div align="center">
 
-🏆 Reached the top 5 teams at the finale out of 200+ competing teams.
+# 🩺 Proxim
 
-Proxim is a browser-based conversational avatar trainer for pharmaceutical sales teams. A rep speaks to a simulated healthcare professional, the system transcribes the question, generates a persona-grounded response, streams audio back in real time, animates a 3D avatar while speaking, and then produces a post-call coaching scorecard.
+### Practice the hardest sales calls before you're in the room
 
-The project is built to match the Proxa Echo integration model: React front end, live multi-turn sessions, configurable HCP personas, and container-friendly deployment.
+[![Live Demo](https://img.shields.io/badge/demo-live-34D399?style=for-the-badge)](https://client-five-ivory-90.vercel.app)
+[![Demo Video](https://img.shields.io/badge/video-watch-FF0000?style=for-the-badge&logo=youtube&logoColor=white)](https://youtu.be/N4RtS9wSZoA?si=2QUX1ryt69F70uSG)
+[![License: MIT](https://img.shields.io/badge/license-MIT-38ABCC?style=for-the-badge)](LICENSE)
+
+🏆 **Top 5 of 200+ teams** · Conversation AI Hackathon 2026
+
+</div>
+
+---
+
+Proxim drops a pharma sales rep into a live voice call with a simulated physician — not a script, not a quiz. The rep talks, a persona-grounded LLM talks back in character, a 3D avatar lip-syncs the reply, a compliance monitor flags risky phrasing **as it's said**, and the call ends with a coaching scorecard instead of a grade.
+
+It's built end-to-end: real-time voice pipeline, WebSocket session orchestration, a 3D rendering layer, and an LLM/TTS stack with provider fallbacks — all shipped and verifiably running in production, not just on `localhost`.
+
+## Screenshots
+
+| Live call with a simulated physician | Real-time compliance flag |
+| --- | --- |
+| ![Live call](docs/screenshots/live-call.png) | ![Compliance flag](docs/screenshots/compliance-flag.png) |
 
 ## Live Demo
 
-- **App**: [client-five-ivory-90.vercel.app](https://client-five-ivory-90.vercel.app)
-- **Demo video**: [youtu.be/N4RtS9wSZoA](https://youtu.be/N4RtS9wSZoA?si=2QUX1ryt69F70uSG)
-- **API**: [proxim-server.onrender.com](https://proxim-server.onrender.com) ([/health](https://proxim-server.onrender.com/health))
+| | |
+| --- | --- |
+| 🌐 **App** | [client-five-ivory-90.vercel.app](https://client-five-ivory-90.vercel.app) |
+| 🎬 **Demo video** | [youtu.be/N4RtS9wSZoA](https://youtu.be/N4RtS9wSZoA?si=2QUX1ryt69F70uSG) |
+| 🔌 **API health** | [proxim-server.onrender.com/health](https://proxim-server.onrender.com/health) |
+| 🔑 **Sign in** | see [Sign-In](#sign-in) below |
 
-Hosting: client on Vercel, server on Render's free tier. The server spins down after 15 minutes idle — the **first request after a quiet period can take 30-60 seconds** to wake it back up before the call connects. If the avatar seems stuck on load, give it a minute and retry.
+> Hosting: client on Vercel, server on Render's free tier. The server sleeps after 15 minutes idle — the **first request after a quiet period can take 30-60 seconds** to wake it before the call connects. If the avatar seems stuck loading, give it a minute and retry.
 
-## Submission Checklist
+## Sign-In
 
-- Public GitHub repository with full source code: this repository
-- Open-source license: [MIT](LICENSE)
-- README with setup, dependencies, and architecture overview: this file
-- Working demo video: [youtu.be/N4RtS9wSZoA](https://youtu.be/N4RtS9wSZoA?si=2QUX1ryt69F70uSG)
-- Brief written technical document: [docs/TECHNICAL_APPROACH.md](docs/TECHNICAL_APPROACH.md)
-- AWS/Docker deployment guide: [docs/AWS_DOCKER_DEPLOYMENT.md](docs/AWS_DOCKER_DEPLOYMENT.md)
-- Third-party API/model documentation with licensing notes: [docs/THIRD_PARTY_APIS_AND_LICENSES.md](docs/THIRD_PARTY_APIS_AND_LICENSES.md)
+The app sits behind a lightweight session-cookie gate — both the HTTP app and the WebSocket handshake check it, so there's no way to open a call without signing in first.
+
+Ask whoever shared this link for the current demo username/password (configured via `AUTH_USERNAME` / `AUTH_PASSWORD` on the server, see [server/.env.example](server/.env.example)). Running locally, it defaults to `demo` / `proxim-demo`.
+
+This is intentionally a single shared demo account, not a multi-user system — see [Known Limitations](#known-limitations).
 
 ## What the project demonstrates
 
@@ -34,21 +53,24 @@ Hosting: client on Vercel, server on Render's free tier. The server spins down a
 - Reliable post-call debrief delivery with a scorecard wait state
 - Real-time compliance flagging for risky rep phrasing
 - Interruptible voice-to-voice turns for natural barge-in
+- Session-cookie auth gating both the HTTP app and the WebSocket handshake
 - Containerizable client/server deployment
 
 ## Architecture Overview
 
 ```text
 Browser (React + Vite)
+  - sign-in gate (session cookie)
   - microphone capture
   - transcript UI
   - persona selection
   - 3D avatar rendering
   - audio playback and diagnostics
             |
-            | HTTP + WebSocket
+            | HTTP + WebSocket (cookie-authenticated)
             v
 Server (Node.js + Express + ws)
+  - session cookie issue / verify
   - session orchestration
   - persona loading
   - LLM response streaming
@@ -64,20 +86,30 @@ Server (Node.js + Express + ws)
 - React Three Fiber / Three.js avatar rendering
 - Zustand state management
 - Voice input, transcript, playback, diagnostics, and scorecard UI
+- `src/auth/` — login screen + session gate wrapping the app
 
 ### Back end
 
 - Node.js + Express + TypeScript
-- WebSocket session transport
+- WebSocket session transport, cookie-authenticated at handshake
+- HMAC-signed session cookies (`src/auth.ts`) — no extra auth dependency
 - Persona-driven prompt orchestration
 - Groq, Anthropic, OpenAI, and ElevenLabs integration points
 
 ## Repository Structure
 
 ```text
-client/   React application and avatar UI
-server/   Express/WebSocket orchestration service
-docs/     Submission-ready technical and licensing notes
+client/             React application and avatar UI
+  src/auth/            Login screen + session gate
+  src/components/      Call UI (avatar, transcript, compliance monitor, scorecard, ...)
+  src/hooks/           Session, audio, voice-input, theme hooks
+  src/sdk/             Reusable WebSocket session API (useProximAvatarSession)
+  src/store/           Zustand state
+server/             Express/WebSocket orchestration service
+  src/auth.ts           Session token sign/verify (HMAC, no external dep)
+  src/routes/           HTTP routes (auth, session, avatar proxy)
+  src/websocket/        WS message handler
+docs/               Submission-ready technical notes, deployment guide, screenshots
 ```
 
 ## Personas Included
@@ -117,6 +149,11 @@ Optional quality/fallback providers:
 - `LLM_PROVIDER` (`auto`, `groq`, `anthropic`, or `openai`)
 - `OPENAI_CHAT_MODEL` (defaults to `gpt-4.1`)
 
+Sign-in (optional to override, has working defaults):
+
+- `AUTH_USERNAME` / `AUTH_PASSWORD` (defaults to `demo` / `proxim-demo`)
+- `SESSION_SECRET` (generate with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`)
+
 ### 1. Install dependencies
 
 ```bash
@@ -147,7 +184,7 @@ The API and WebSocket server run on `http://localhost:3001`.
 npm run dev --prefix client
 ```
 
-The web app runs on `http://localhost:5173`.
+The web app runs on `http://localhost:5173`. Sign in with `demo` / `proxim-demo` unless you overrode it.
 
 ## Docker Deployment
 
@@ -168,6 +205,13 @@ Endpoints:
 For AWS EC2 deployment, scalability notes, and reviewer checks, see [docs/AWS_DOCKER_DEPLOYMENT.md](docs/AWS_DOCKER_DEPLOYMENT.md).
 
 ## Key Runtime Behavior
+
+### Sign-in
+
+- A single demo account (`AUTH_USERNAME` / `AUTH_PASSWORD`) gates the app.
+- On success, the server sets an `httpOnly`, `Secure`, `SameSite=None` session cookie, HMAC-signed with `SESSION_SECRET` and verified with a timing-safe comparison.
+- The same cookie is checked again at the WebSocket upgrade — an unauthenticated client cannot open a call even by hitting the socket directly.
+- Session cookies expire after 24 hours; the client re-checks `/api/auth/me` on load and shows the login screen if the session is missing or expired.
 
 ### Voice input
 
@@ -247,6 +291,8 @@ See [server/.env.example](server/.env.example) for the full list. Main variables
 - `OPENAI_CHAT_MODEL`
 - `GROQ_STT_MODEL`
 - `PERSONAS_PATH`
+- `AUTH_USERNAME` / `AUTH_PASSWORD`
+- `SESSION_SECRET`
 
 ### Client
 
@@ -263,10 +309,11 @@ See [client/.env.example](client/.env.example). Main variables:
 
 ## Demo Guidance
 
-Recorded per [DEMO_SCRIPT.md](DEMO_SCRIPT.md) — see the [Live Demo](#live-demo) section above for the video link.
+Recorded per [docs/DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) — see [Live Demo](#live-demo) above for the video link.
 
 ## Known Limitations
 
+- Sign-in is a single shared demo account, not a multi-user system with individual accounts or signup.
 - Session history is stored in memory only.
 - Audio is transported in base64 WebSocket payloads, which favors simplicity over efficiency.
 - Optional providers change output quality depending on which keys are configured.

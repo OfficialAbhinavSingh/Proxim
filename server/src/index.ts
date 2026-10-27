@@ -6,8 +6,10 @@ import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import { sessionRouter } from "./routes/session.js";
 import { avatarProxyRouter } from "./routes/avatarProxy.js";
+import { authRouter } from "./routes/auth.js";
 import { createWsHandler } from "./websocket/wsHandler.js";
 import { WS_PROTOCOL_VERSION } from "./types/index.js";
+import { AUTH_COOKIE_NAME, readCookie, verifySessionToken } from "./auth.js";
 
 const app = express();
 const avatarPublicDir =
@@ -28,12 +30,19 @@ app.get("/health", (_req, res) => {
 
 app.use("/assets", avatarProxyRouter);
 app.use("/session", sessionRouter);
+app.use("/api/auth", authRouter);
 
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 const handleWs = createWsHandler();
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
+  const session = verifySessionToken(readCookie(req, AUTH_COOKIE_NAME));
+  if (!session) {
+    ws.close(4001, "unauthorized");
+    return;
+  }
+
   // Tiny handshake so clients can detect stale bundles / mismatched deployments.
   ws.send(
     JSON.stringify({
