@@ -43,3 +43,5 @@ _tmp/
 *.glb
 !client/public/avatars/*.glb
 tmp/
+.vercel
+.env*
