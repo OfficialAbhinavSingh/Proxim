@@ -6,12 +6,20 @@ Proxim is a browser-based conversational avatar trainer for pharmaceutical sales
 
 The project is built to match the Proxa Echo integration model: React front end, live multi-turn sessions, configurable HCP personas, and container-friendly deployment.
 
+## Live Demo
+
+- **App**: [client-five-ivory-90.vercel.app](https://client-five-ivory-90.vercel.app)
+- **Demo video**: [youtu.be/N4RtS9wSZoA](https://youtu.be/N4RtS9wSZoA?si=2QUX1ryt69F70uSG)
+- **API**: [proxim-server.onrender.com](https://proxim-server.onrender.com) ([/health](https://proxim-server.onrender.com/health))
+
+Hosting: client on Vercel, server on Render's free tier. The server spins down after 15 minutes idle — the **first request after a quiet period can take 30-60 seconds** to wake it back up before the call connects. If the avatar seems stuck on load, give it a minute and retry.
+
 ## Submission Checklist
 
 - Public GitHub repository with full source code: this repository
 - Open-source license: [MIT](LICENSE)
 - README with setup, dependencies, and architecture overview: this file
-- Working demo video: add your recording link before submission
+- Working demo video: [youtu.be/N4RtS9wSZoA](https://youtu.be/N4RtS9wSZoA?si=2QUX1ryt69F70uSG)
 - Brief written technical document: [docs/TECHNICAL_APPROACH.md](docs/TECHNICAL_APPROACH.md)
 - AWS/Docker deployment guide: [docs/AWS_DOCKER_DEPLOYMENT.md](docs/AWS_DOCKER_DEPLOYMENT.md)
 - Third-party API/model documentation with licensing notes: [docs/THIRD_PARTY_APIS_AND_LICENSES.md](docs/THIRD_PARTY_APIS_AND_LICENSES.md)
@@ -255,7 +263,7 @@ See [client/.env.example](client/.env.example). Main variables:
 
 ## Demo Guidance
 
-Use [DEMO_SCRIPT.md](DEMO_SCRIPT.md) as the outline for the 3-5 minute submission video. Before submitting, add your hosted demo video link to this README or the repository description.
+Recorded per [DEMO_SCRIPT.md](DEMO_SCRIPT.md) — see the [Live Demo](#live-demo) section above for the video link.
 
 ## Known Limitations
 
