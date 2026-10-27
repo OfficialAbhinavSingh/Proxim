@@ -39,7 +39,9 @@ It's built end-to-end: real-time voice pipeline, WebSocket session orchestration
 
 The app sits behind a lightweight session-cookie gate — both the HTTP app and the WebSocket handshake check it, so there's no way to open a call without signing in first.
 
-Ask whoever shared this link for the current demo username/password (configured via `AUTH_USERNAME` / `AUTH_PASSWORD` on the server, see [server/.env.example](server/.env.example)). Running locally, it defaults to `demo` / `proxim-demo`.
+**Demo credentials:** `demo` / `1234`
+
+Configured via `AUTH_USERNAME` / `AUTH_PASSWORD` on the server (see [server/.env.example](server/.env.example)). Running locally without setting those, it defaults to `demo` / `proxim-demo`.
 
 This is intentionally a single shared demo account, not a multi-user system — see [Known Limitations](#known-limitations).
 
